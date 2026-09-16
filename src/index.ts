@@ -10,7 +10,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { EpoClient, OpsApiError, type ThrottleStatus } from "./epo-client.js";
+import { EpoClient, OpsApiError } from "./epo-client.js";
 import {
   parseSearchResults,
   parseBiblio,
@@ -24,6 +24,7 @@ import {
   type PatentBiblio,
   type FamilyMember,
 } from "./parsers.js";
+import { createHelpers, GROUNDING_NOTICE } from "./helpers.js";
 
 /* ---------- env ---------- */
 
@@ -38,82 +39,7 @@ if (!CONSUMER_KEY || !CONSUMER_SECRET) {
 }
 
 const client = new EpoClient(CONSUMER_KEY, CONSUMER_SECRET);
-
-/* ---------- helpers ---------- */
-
-function errorResult(e: unknown) {
-  const msg = e instanceof Error ? e.message : String(e);
-  const throttle = client.lastThrottle;
-  const parts = [`Error: ${msg}`];
-  if (/ambiguous/i.test(msg)) {
-    parts.push(
-      `\nHint: OPS found several publications for this number (e.g. A1 and B1). Give a kind code in docdb format, e.g. "EP.1234567.B1", or use epodoc format ("EP1234567") to take the first one.`
-    );
-  }
-  if (/3 characters required when '\*'/i.test(msg)) {
-    parts.push(
-      `\nHint: hyphens split a term into tokens, so freeze-dr* is read as dr*. Use the full word ("freeze-drying") or an unhyphenated stem with at least 3 characters before the *.`
-    );
-  }
-  if (throttle?.isThrottled) {
-    parts.push(
-      `\nRate limit status: ${throttle.overallStatus}. ` +
-      Object.entries(throttle.services)
-        .filter(([, s]) => s.color !== "green")
-        .map(([name, s]) => `${name}=${s.color}:${s.remaining}`)
-        .join(", ") +
-      `. Wait 1-2 minutes before retrying.`
-    );
-  }
-  return {
-    content: [{ type: "text" as const, text: parts.join("") }],
-    isError: true,
-  };
-}
-
-const GROUNDING_NOTICE =
-  "GROUNDING: Only patent numbers, dates, names, and text that appear in this response may be cited in your output. Never supplement with patent numbers from your own knowledge. When quoting patent claims or description passages, use the exact text returned here — do not paraphrase from memory.";
-
-function jsonResult(data: unknown, { grounding = false }: { grounding?: boolean } = {}) {
-  // Inject throttle status into response data when available
-  const enriched = appendThrottleInfo(data);
-  const content: { type: "text"; text: string }[] = [
-    { type: "text" as const, text: JSON.stringify(enriched, null, 2) },
-  ];
-  if (grounding) {
-    content.push({ type: "text" as const, text: GROUNDING_NOTICE });
-  }
-  return { content };
-}
-
-/** Append a compact throttle summary to any response object when rate limits are approaching. */
-function appendThrottleInfo(data: unknown): unknown {
-  const throttle = client.lastThrottle;
-  if (!throttle) return data;
-
-  // Only include throttle info when it's actionable (yellow/orange/red/black)
-  // or always include a compact summary so callers can plan
-  const quota: Record<string, unknown> = {};
-  for (const [service, status] of Object.entries(throttle.services)) {
-    quota[service] = { remaining: status.remaining, status: status.color };
-  }
-
-  const throttleInfo = {
-    overallStatus: throttle.overallStatus,
-    isThrottled: throttle.isThrottled,
-    quota,
-    ...(throttle.isThrottled && {
-      warning: "EPO OPS rate limits are approaching. Space out requests or wait 1-2 minutes to avoid timeouts.",
-    }),
-  };
-
-  if (typeof data === "object" && data !== null && !Array.isArray(data)) {
-    return { ...data, _throttle: throttleInfo };
-  }
-  // For array responses, don't wrap — callers expect raw arrays.
-  // Throttle info is available via the next object-type response.
-  return data;
-}
+const { errorResult, jsonResult, appendThrottleInfo } = createHelpers(client);
 
 /**
  * Try to fetch fulltext (claims or description) for a document.
