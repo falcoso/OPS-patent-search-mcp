@@ -5,6 +5,7 @@ import { parseSearchResults, parseFulltextParagraphs, searchKeywordsInParagraphs
 import { createHelpers } from "../helpers.js";
 import { fetchWithFamilyFallback } from "../fallback.js";
 import { fallbackToFamilyParam } from "./params.js";
+import { buildDateCql } from "../search.js";
 
 export function registerSearchAndFilterFulltext(server: McpServer, client: EpoClient) {
   const { errorResult, jsonResult } = createHelpers(client);
@@ -91,14 +92,7 @@ Full text exists mainly for EP, WO and US. Patents without it are reported under
   }) => {
     client.startToolCall();
     try {
-      let cql = query;
-      if (published_after && published_before) {
-        cql += ` AND pd within "${published_after} ${published_before}"`;
-      } else if (published_after) {
-        cql += ` AND pd>=${published_after}`;
-      } else if (published_before) {
-        cql += ` AND pd<=${published_before}`;
-      }
+      const cql = buildDateCql(query, published_after, published_before);
 
       // Fetch a wider window than we will scan. OPS orders results by relevance,
       // and the top of that list is often CN/JP/KR or very recent WO documents

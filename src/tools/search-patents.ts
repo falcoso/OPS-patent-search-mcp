@@ -3,7 +3,7 @@ import { z } from "zod";
 import { EpoClient, OpsApiError } from "../epo-client.js";
 import { parseSearchResults, type SearchResultItem } from "../parsers.js";
 import { createHelpers, GROUNDING_NOTICE } from "../helpers.js";
-import { computeLandscapeStats, projectResults } from "../search.js";
+import { computeLandscapeStats, projectResults, buildDateCql } from "../search.js";
 
 export function registerSearchPatents(server: McpServer, client: EpoClient) {
   const { errorResult, jsonResult, appendThrottleInfo } = createHelpers(client);
@@ -103,16 +103,7 @@ Example queries:
   async ({ query, range_start, range_end, published_after, published_before, count_only, detail_level, auto_paginate, max_results }) => {
     client.startToolCall();
     try {
-      // Build date-filtered CQL (for single-page and count modes)
-      // OPS requires pd within "X,Y" for two-sided ranges; single-sided pd>=X is fine
-      let cql = query;
-      if (published_after && published_before) {
-        cql += ` AND pd within "${published_after},${published_before}"`;
-      } else if (published_after) {
-        cql += ` AND pd>=${published_after}`;
-      } else if (published_before) {
-        cql += ` AND pd<=${published_before}`;
-      }
+      const cql = buildDateCql(query, published_after, published_before);
 
       // ── count_only: just return total without fetching results ──────────────
       if (count_only) {
@@ -273,7 +264,7 @@ Example queries:
         const yearCoverage: string[] = [];
         let yearError = false;
         for (let year = startYear; year <= endYear && allResults.length < max_results; year++) {
-          const yearCql = `${query} AND pd within "${year}0101,${year}1231"`;
+          const yearCql = buildDateCql(query, `${year}0101`, `${year}1231`);
           const beforeCount = allResults.length;
           const { pageTotal: yearTotal, error } = await paginateInto(yearCql, allResults, seen, allResults.length + (max_results - allResults.length));
           const fetched = allResults.length - beforeCount;

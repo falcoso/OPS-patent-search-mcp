@@ -182,3 +182,14 @@ export function projectResults(results: SearchResultItem[], level: "full" | "com
     fulltextLikely: r.fulltextLikely,
   }));
 }
+
+/**
+ * Append an OPS publication-date filter to a CQL query.
+ * Two-sided ranges must use `pd within "X,Y"` (comma). Single-sided `pd>=X` / `pd<=Y` is fine.
+ */
+export function buildDateCql(query: string, after?: string, before?: string): string {
+  if (after && before) return `${query} AND pd within "${after},${before}"`;
+  if (after) return `${query} AND pd>=${after}`;
+  if (before) return `${query} AND pd<=${before}`;
+  return query;
+}
