@@ -25,6 +25,11 @@ import {
   type FamilyMember,
 } from "./parsers.js";
 import { createHelpers, GROUNDING_NOTICE } from "./helpers.js";
+import {
+  getFamilyWithFormatFallback,
+  fetchWithFamilyFallback,
+  substitutionNote,
+} from "./fallback.js";
 
 /* ---------- env ---------- */
 
@@ -40,153 +45,6 @@ if (!CONSUMER_KEY || !CONSUMER_SECRET) {
 
 const client = new EpoClient(CONSUMER_KEY, CONSUMER_SECRET);
 const { errorResult, jsonResult, appendThrottleInfo } = createHelpers(client);
-
-/**
- * Try to fetch fulltext (claims or description) for a document.
- * If the initial fetch returns 404, fetch the patent family and try
- * EP/WO members first (most reliably indexed in OPS), then others.
- * Returns the raw JSON, the document that succeeded, and whether a
- * family substitution was made.
- */
-/** Compute alternative kind codes to try for a document number before family fallback. */
-function computeKindFallbacks(docNumber: string, inputFormat: string): string[] {
-  // Only works for epodoc-style numbers where we can extract country+number
-  if (inputFormat === "docdb") {
-    // docdb format: CC.number.KK — extract parts and try other kind codes
-    const parts = docNumber.split(".");
-    if (parts.length === 3) {
-      const [cc, num, currentKind] = parts;
-      // Only try A1/B1 — covers >90% of cases without excessive API calls
-      return ["A1", "B1"]
-        .filter((k) => k !== currentKind)
-        .map((k) => `${cc}.${num}.${k}`);
-    }
-    return [];
-  }
-  // epodoc: e.g. EP1000000 — try docdb format with A1/B1 kind codes
-  const m = docNumber.match(/^([A-Z]{2})(.+)$/);
-  if (!m) return [];
-  const [, cc, num] = m;
-  return ["A1", "B1"].map((k) => `${cc}.${num}.${k}`);
-}
-
-/**
- * The OPS family endpoint rejects some numbers in epodoc format that the
- * biblio endpoint accepts (US application publications such as US2023233694,
- * some WO numbers). Those resolve in docdb format with an explicit kind code.
- * Retry with the common kind codes before giving up so that get_patent_family
- * and the full-text family fallback do not dead-end on documents that
- * get_patent_details just returned.
- */
-async function getFamilyWithFormatFallback(
-  docNumber: string,
-  inputFormat: string,
-  light = false
-): Promise<{ raw: string; resolvedAs: string }> {
-  const fetch = (d: string, f: string) => (light ? client.getFamilyLight(d, f) : client.getFamily(d, f));
-  try {
-    return { raw: await fetch(docNumber, inputFormat), resolvedAs: docNumber };
-  } catch (e) {
-    if (!(e instanceof OpsApiError) || e.status !== 404 || inputFormat !== "epodoc") throw e;
-    const m = docNumber.match(/^([A-Z]{2})(\d+)$/);
-    if (!m) throw e;
-    const [, cc, num] = m;
-    for (const kind of ["A1", "A2", "B1", "B2", "A", "B"]) {
-      const alt = `${cc}.${num}.${kind}`;
-      try {
-        return { raw: await fetch(alt, "docdb"), resolvedAs: alt };
-      } catch (inner) {
-        if (!(inner instanceof OpsApiError) || inner.status !== 404) throw inner;
-      }
-    }
-    throw e;
-  }
-}
-
-async function fetchWithFamilyFallback(
-  docNumber: string,
-  inputFormat: string,
-  fetcher: (docNum: string, fmt: string) => Promise<string>
-): Promise<{ raw: string; resolvedDocument: string; substituted: boolean }> {
-  try {
-    const raw = await fetcher(docNumber, inputFormat);
-    return { raw, resolvedDocument: docNumber, substituted: false };
-  } catch (e) {
-    if (!(e instanceof OpsApiError) || e.status !== 404) throw e;
-  }
-
-  // 404 — try alternative kind codes for the same patent before family lookup
-  const kindFallbacks = computeKindFallbacks(docNumber, inputFormat);
-  for (const alt of kindFallbacks) {
-    try {
-      const raw = await fetcher(alt, "docdb");
-      return { raw, resolvedDocument: alt, substituted: true };
-    } catch {
-      // try next kind code
-    }
-  }
-
-  // Still 404 — try the patent family
-  let familyRaw: string;
-  try {
-    familyRaw = (await getFamilyWithFormatFallback(docNumber, inputFormat)).raw;
-  } catch (e) {
-    // Very large families (Xencor, Immunomedics) are refused with "smaller
-    // chunks"; the light variant still lists members, which is all we need.
-    if (e instanceof OpsApiError && e.message.includes("smaller chunks")) {
-      try {
-        familyRaw = (await getFamilyWithFormatFallback(docNumber, inputFormat, true)).raw;
-      } catch {
-        throw new OpsApiError(
-          404,
-          `Full text not available for ${docNumber} and could not retrieve patent family for fallback.`
-        );
-      }
-    } else {
-      throw new OpsApiError(
-        404,
-        `Full text not available for ${docNumber} and could not retrieve patent family for fallback.`
-      );
-    }
-  }
-
-  const members = parseFamilyMembers(familyRaw);
-  if (members.length === 0) {
-    throw new OpsApiError(
-      404,
-      `Full text not available for ${docNumber} and no family members found.`
-    );
-  }
-
-  // Prioritise offices most likely to have full text in OPS
-  const priority = ["EP", "WO", "GB", "DE", "FR"];
-  const sorted = [...members].sort((a, b) => {
-    const ai = priority.indexOf(a.country);
-    const bi = priority.indexOf(b.country);
-    return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
-  });
-
-  for (const member of sorted) {
-    if (!member.kind || !member.rawNumber) continue;
-    // Docdb format expected by OPS: CC.number.KK  e.g. EP.3750919.A1
-    const docdbNum = `${member.country}.${member.rawNumber}.${member.kind}`;
-    try {
-      const raw = await fetcher(docdbNum, "docdb");
-      return { raw, resolvedDocument: docdbNum, substituted: true };
-    } catch {
-      // try next member
-    }
-  }
-
-  throw new OpsApiError(
-    404,
-    `Full text not available for ${docNumber} or any of its ${members.length} family member(s). ` +
-      `Family includes: ${members
-        .slice(0, 8)
-        .map((m) => m.publicationNumber)
-        .join(", ")}${members.length > 8 ? "…" : ""}.`
-  );
-}
 
 /* ---------- MCP server ---------- */
 
@@ -381,6 +239,24 @@ function projectResults(results: SearchResult[], level: "full" | "compact" | "su
     fulltextLikely: r.fulltextLikely,
   }));
 }
+
+/* --- shared tool params --- */
+
+const documentNumberParam = z
+  .string()
+  .describe('Patent publication number, e.g. "EP1000000"');
+
+const inputFormatParam = z
+  .enum(["epodoc", "docdb", "original"])
+  .default("epodoc")
+  .describe("Number format");
+
+const fallbackToFamilyParam = z
+  .boolean()
+  .default(true)
+  .describe(
+    "If full text is not available for this document, automatically try family members (EP/WO preferred). Default true."
+  );
 
 /* --- search_patents --- */
 
@@ -893,13 +769,8 @@ Use offset/limit/max_characters to control how much text is returned. The respon
 
 Recommended: use search_in_patent_text first to find relevant claim numbers, then read around those locations with offset.`,
     inputSchema: {
-      document_number: z
-        .string()
-        .describe('Patent publication number, e.g. "EP1000000"'),
-      input_format: z
-        .enum(["epodoc", "docdb", "original"])
-        .default("epodoc")
-        .describe('Number format. Try "docdb" with kind code if epodoc fails for fulltext.'),
+      document_number: documentNumberParam,
+      input_format: inputFormatParam.describe('Number format. Try "docdb" with kind code if epodoc fails for fulltext.'),
       offset: z
         .number()
         .int()
@@ -918,12 +789,7 @@ Recommended: use search_in_patent_text first to find relevant claim numbers, the
         .min(100)
         .default(10000)
         .describe("Max characters to return (default 10000). Set higher for full claims."),
-      fallback_to_family: z
-        .boolean()
-        .default(true)
-        .describe(
-          "If full text is not available for this document, automatically try family members (EP/WO preferred). Default true."
-        ),
+      fallback_to_family: fallbackToFamilyParam,
     },
     annotations: { readOnlyHint: true },
   },
@@ -932,16 +798,14 @@ Recommended: use search_in_patent_text first to find relevant claim numbers, the
     try {
       const fetcher = (d: string, f: string) => client.getClaims(d, f);
       const { raw, resolvedDocument, substituted } = fallback_to_family
-        ? await fetchWithFamilyFallback(document_number, input_format, fetcher)
+        ? await fetchWithFamilyFallback(client, document_number, input_format, fetcher)
         : { raw: await fetcher(document_number, input_format), resolvedDocument: document_number, substituted: false };
 
       const paragraphs = parseFulltextParagraphs(raw);
       const result = paginateParagraphs(paragraphs, offset, limit, max_characters);
 
       if (substituted) {
-        const note = result.totalParagraphs === 0
-          ? `Full text not available for ${document_number}. Attempted family member ${resolvedDocument} but it also returned no claims. Granted patent claims (B1/B2 kind codes) are often not available via OPS. Check Espacenet web or USPTO PAIR for granted claim text.`
-          : `Full text not available for ${document_number}. Showing claims from family member ${resolvedDocument}.`;
+        const note = substitutionNote(document_number, resolvedDocument, "claims", result.totalParagraphs === 0);
         return jsonResult({ ...result, note, resolvedDocument }, { grounding: true });
       }
       if (result.totalParagraphs === 0) {
@@ -975,13 +839,8 @@ Recommended workflow:
 2. Then call this with offset set to the sectionOffset from the search results (use matches where section="description")
 3. Use next_offset from the response to continue reading if needed`,
     inputSchema: {
-      document_number: z
-        .string()
-        .describe('Patent publication number, e.g. "EP1000000"'),
-      input_format: z
-        .enum(["epodoc", "docdb", "original"])
-        .default("epodoc")
-        .describe('Number format. Try "docdb" with kind code if epodoc fails for fulltext.'),
+      document_number: documentNumberParam,
+      input_format: inputFormatParam.describe('Number format. Try "docdb" with kind code if epodoc fails for fulltext.'),
       offset: z
         .number()
         .int()
@@ -1000,12 +859,7 @@ Recommended workflow:
         .min(100)
         .default(10000)
         .describe("Max characters to return (default 10000). Increase for longer reads, decrease for overview."),
-      fallback_to_family: z
-        .boolean()
-        .default(true)
-        .describe(
-          "If full text is not available for this document, automatically try family members (EP/WO preferred). Default true."
-        ),
+      fallback_to_family: fallbackToFamilyParam,
     },
     annotations: { readOnlyHint: true },
   },
@@ -1014,16 +868,14 @@ Recommended workflow:
     try {
       const fetcher = (d: string, f: string) => client.getDescription(d, f);
       const { raw, resolvedDocument, substituted } = fallback_to_family
-        ? await fetchWithFamilyFallback(document_number, input_format, fetcher)
+        ? await fetchWithFamilyFallback(client, document_number, input_format, fetcher)
         : { raw: await fetcher(document_number, input_format), resolvedDocument: document_number, substituted: false };
 
       const paragraphs = parseFulltextParagraphs(raw);
       const result = paginateParagraphs(paragraphs, offset, limit, max_characters);
 
       if (substituted) {
-        const note = result.totalParagraphs === 0
-          ? `Full text not available for ${document_number}. Attempted family member ${resolvedDocument} but it also returned no description. Granted patents (B1/B2) often lack full text in OPS. Try the A1/A2 version or check Espacenet web.`
-          : `Full text not available for ${document_number}. Showing description from family member ${resolvedDocument}.`;
+        const note = substitutionNote(document_number, resolvedDocument, "description", result.totalParagraphs === 0);
         return jsonResult({ ...result, note, resolvedDocument }, { grounding: true });
       }
       if (result.totalParagraphs === 0) {
@@ -1056,17 +908,12 @@ When fallback_to_family is true (default), a 404 will automatically try EP/WO fa
 
 Full text is available primarily for EP, WO, and US patents.`,
     inputSchema: {
-      document_number: z
-        .string()
-        .describe('Patent publication number, e.g. "EP1000000"'),
+      document_number: documentNumberParam,
       search_terms: z
         .array(z.string())
         .min(1)
         .describe('Keywords to search for, e.g. ["kinase", "inhibitor", "pharmaceutical"]'),
-      input_format: z
-        .enum(["epodoc", "docdb", "original"])
-        .default("epodoc")
-        .describe("Number format"),
+      input_format: inputFormatParam,
       context_chars: z
         .number()
         .int()
@@ -1089,12 +936,7 @@ Full text is available primarily for EP, WO, and US patents.`,
         .array(z.enum(["claims", "description"]))
         .optional()
         .describe('Restrict search to specific sections, e.g. ["claims"]. Omit to search both.'),
-      fallback_to_family: z
-        .boolean()
-        .default(true)
-        .describe(
-          "If full text is not available for this document, automatically try family members (EP/WO preferred). Default true."
-        ),
+      fallback_to_family: fallbackToFamilyParam,
     },
     annotations: { readOnlyHint: true },
   },
@@ -1122,7 +964,7 @@ Full text is available primarily for EP, WO, and US patents.`,
       if (fallback_to_family) {
         // Try claims with fallback
         try {
-          const result = await fetchWithFamilyFallback(
+          const result = await fetchWithFamilyFallback(client,
             document_number,
             input_format,
             (d, f) => client.getClaims(d, f)
@@ -1140,7 +982,7 @@ Full text is available primarily for EP, WO, and US patents.`,
         const descDoc = substituted ? resolvedClaimsDoc : document_number;
         const descFmt = substituted ? "docdb" : input_format;
         try {
-          const result = await fetchWithFamilyFallback(
+          const result = await fetchWithFamilyFallback(client,
             descDoc,
             descFmt,
             (d, f) => client.getDescription(d, f)
@@ -1288,10 +1130,7 @@ Full text exists mainly for EP, WO and US. Patents without it are reported under
         .boolean()
         .default(false)
         .describe("Case-sensitive matching (default false)"),
-      fallback_to_family: z
-        .boolean()
-        .default(true)
-        .describe("On a 404, try EP/WO family equivalents for full text. Default true."),
+      fallback_to_family: fallbackToFamilyParam.describe("On a 404, try EP/WO family equivalents for full text. Default true."),
     },
     annotations: { readOnlyHint: true },
   },
@@ -1371,7 +1210,7 @@ Full text exists mainly for EP, WO and US. Patents without it are reported under
         if (wantClaims) {
           try {
             if (fallback_to_family) {
-              const r = await fetchWithFamilyFallback(doc, "epodoc", (d, f) => client.getClaims(d, f));
+              const r = await fetchWithFamilyFallback(client, doc, "epodoc", (d, f) => client.getClaims(d, f));
               claimsRaw = r.raw;
               if (r.substituted) substitutedFrom = r.resolvedDocument;
             } else {
@@ -1387,7 +1226,7 @@ Full text exists mainly for EP, WO and US. Patents without it are reported under
             const srcDoc = substitutedFrom ?? doc;
             const srcFmt = substitutedFrom ? "docdb" : "epodoc";
             if (fallback_to_family) {
-              const r = await fetchWithFamilyFallback(srcDoc, srcFmt, (d, f) => client.getDescription(d, f));
+              const r = await fetchWithFamilyFallback(client, srcDoc, srcFmt, (d, f) => client.getDescription(d, f));
               descRaw = r.raw;
               if (r.substituted) substitutedFrom = r.resolvedDocument;
             } else {
@@ -1512,13 +1351,8 @@ Use this to find equivalent patents filed in other countries, or to see the full
 
 Response: { familySize, countByCountry, returned, members[] }. countByCountry always covers the whole family. Prolific filers have families of 300-700 members, so members are capped by max_members (default 150); use the countries filter (e.g. ["EP","US","WO"]) to see the members you need without raising the cap.`,
     inputSchema: {
-      document_number: z
-        .string()
-        .describe('Patent publication number, e.g. "EP1000000"'),
-      input_format: z
-        .enum(["epodoc", "docdb", "original"])
-        .default("epodoc")
-        .describe("Number format"),
+      document_number: documentNumberParam,
+      input_format: inputFormatParam,
       countries: z
         .array(z.string())
         .optional()
@@ -1557,13 +1391,13 @@ Response: { familySize, countByCountry, returned, members[] }. countByCountry al
       }, { grounding: true });
     };
     try {
-      const { raw, resolvedAs } = await getFamilyWithFormatFallback(document_number, input_format);
+      const { raw, resolvedAs } = await getFamilyWithFormatFallback(client, document_number, input_format);
       return shape(parseFamilyMembers(raw), resolvedAs);
     } catch (e) {
       // Handle "smaller chunks" error for very large patent families — retry without biblio
       if (e instanceof OpsApiError && e.message.includes("smaller chunks")) {
         try {
-          const { raw, resolvedAs } = await getFamilyWithFormatFallback(document_number, input_format, true);
+          const { raw, resolvedAs } = await getFamilyWithFormatFallback(client, document_number, input_format, true);
           return shape(parseFamilyMembers(raw), resolvedAs, "Large family retrieved without biblio data; titles may be missing. Use get_patent_details on individual members.");
         } catch {
           return jsonResult({
@@ -1753,13 +1587,8 @@ Returns a statusSummary object with:
 
 Plus the full list of raw legal events. Each event now includes refCountryCode (contracting state), effectiveDate, freeText, and yearOfFeePayment when available from the OPS data.`,
     inputSchema: {
-      document_number: z
-        .string()
-        .describe('Patent publication number, e.g. "EP1000000" or "US10000000"'),
-      input_format: z
-        .enum(["epodoc", "docdb", "original"])
-        .default("epodoc")
-        .describe("Number format"),
+      document_number: documentNumberParam.describe('Patent publication number, e.g. "EP1000000" or "US10000000"'),
+      input_format: inputFormatParam,
       event_types: z
         .array(z.enum(["grant", "lapse", "opposition", "spc_pte", "withdrawal", "abandonment", "fee_payment"]))
         .optional()
@@ -1880,13 +1709,8 @@ Returns patent citations (with publication numbers) and non-patent literature ci
 
 To find forward citations — patents that cite a given document — use search_patents with the CQL query: ct="EP1000000" (replace with the target document number).`,
     inputSchema: {
-      document_number: z
-        .string()
-        .describe('Patent publication number, e.g. "EP1000000"'),
-      input_format: z
-        .enum(["epodoc", "docdb", "original"])
-        .default("epodoc")
-        .describe("Number format"),
+      document_number: documentNumberParam,
+      input_format: inputFormatParam,
       max_citations: z
         .number()
         .int()
