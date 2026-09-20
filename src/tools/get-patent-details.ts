@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { EpoClient, OpsApiError } from "../epo-client.js";
 import { parseBiblio, type PatentBiblio } from "../parsers.js";
-import { createHelpers } from "../helpers.js";
+import { wrapJsonTool } from "../helpers.js";
 
 // OPS answers an unknown number with an exchange-document that has no
 // bibliographic content. Returning that as a record made "not found" look
@@ -130,21 +130,7 @@ export async function getPatentDetails(
   }
 }
 
-async function getPatentDetailsMcp(
-  client: EpoClient,
-  args: GetPatentDetailsArgs,
-) {
-  const helpers = createHelpers(client);
-  try {
-
-    return helpers.jsonResult(await getPatentDetails(client, args), { grounding: true });
-  } catch (e) {
-    return helpers.errorResult(e);
-  }
-}
-
 export function registerGetPatentDetails(server: McpServer, client: EpoClient) {
-
   server.registerTool(
     "get_patent_details",
     {
@@ -180,6 +166,6 @@ Batch mode: pass document_numbers (array of up to 100 numbers) to retrieve multi
       },
       annotations: { readOnlyHint: true },
     },
-    async (args) => getPatentDetailsMcp(client, args),
+    wrapJsonTool(client, getPatentDetails, { grounding: true }),
   );
 }
