@@ -2,16 +2,49 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { EpoClient } from "../epo-client.js";
 import { parseCitations } from "../parsers.js";
-import { createHelpers } from "../helpers.js";
+import { wrapJsonTool } from "../helpers.js";
 import { documentNumberParam, inputFormatParam } from "./params.js";
 
-export function registerGetPatentCitations(server: McpServer, client: EpoClient) {
-  const { errorResult, jsonResult } = createHelpers(client);
+type GetPatentCitationsArgs = {
+  document_number: string;
+  input_format: string;
+  max_citations: number;
+  citations_offset: number;
+};
 
-server.registerTool(
-  "get_patent_citations",
-  {
-    description: `Get the list of documents cited within a patent (backward citations / prior art references).
+export async function getPatentCitations(
+  client: EpoClient,
+  { document_number, input_format, max_citations, citations_offset }: GetPatentCitationsArgs,
+) {
+  client.startToolCall();
+  const raw = await client.getBiblio(document_number, input_format);
+  const citations = parseCitations(raw);
+  const allPatent = citations.filter((c) => c.type === "patent");
+  const allNpl = citations.filter((c) => c.type === "npl");
+  const patentCitations = allPatent.slice(citations_offset, citations_offset + max_citations);
+  const nplCitations = allNpl.slice(citations_offset, citations_offset + max_citations);
+  const truncated = allPatent.length > citations_offset + max_citations || allNpl.length > citations_offset + max_citations;
+  return {
+    documentNumber: document_number,
+    totalCitations: citations.length,
+    patentCitationCount: allPatent.length,
+    nplCitationCount: allNpl.length,
+    returnedPatentCitations: patentCitations.length,
+    returnedNplCitations: nplCitations.length,
+    truncated,
+    patentCitations,
+    nplCitations,
+    ...(citations_offset > 0 && { citationsOffset: citations_offset }),
+    ...(truncated && { note: `Truncated: showing ${patentCitations.length} of ${allPatent.length} patent and ${nplCitations.length} of ${allNpl.length} NPL citations. Call again with citations_offset=${citations_offset + max_citations} for the next page.` }),
+    hint: `To find patents that CITE ${document_number} (forward citations), use search_patents with query: ct="${document_number}"`,
+  };
+}
+
+export function registerGetPatentCitations(server: McpServer, client: EpoClient) {
+  server.registerTool(
+    "get_patent_citations",
+    {
+      description: `Get the list of documents cited within a patent (backward citations / prior art references).
 
 IMPORTANT — LEGAL: Only list citations returned by this tool. Never fabricate citation relationships.
 
@@ -43,34 +76,7 @@ To find forward citations — patents that cite a given document — use search_
         .describe("Skip this many citations of each type before returning max_citations of them. Use with truncated=true to page through long citation lists."),
     },
     annotations: { readOnlyHint: true },
-  },
-  async ({ document_number, input_format, max_citations, citations_offset }) => {
-    client.startToolCall();
-    try {
-      const raw = await client.getBiblio(document_number, input_format);
-      const citations = parseCitations(raw);
-      const allPatent = citations.filter((c) => c.type === "patent");
-      const allNpl = citations.filter((c) => c.type === "npl");
-      const patentCitations = allPatent.slice(citations_offset, citations_offset + max_citations);
-      const nplCitations = allNpl.slice(citations_offset, citations_offset + max_citations);
-      const truncated = allPatent.length > citations_offset + max_citations || allNpl.length > citations_offset + max_citations;
-      return jsonResult({
-        documentNumber: document_number,
-        totalCitations: citations.length,
-        patentCitationCount: allPatent.length,
-        nplCitationCount: allNpl.length,
-        returnedPatentCitations: patentCitations.length,
-        returnedNplCitations: nplCitations.length,
-        truncated,
-        patentCitations,
-        nplCitations,
-        ...(citations_offset > 0 && { citationsOffset: citations_offset }),
-        ...(truncated && { note: `Truncated: showing ${patentCitations.length} of ${allPatent.length} patent and ${nplCitations.length} of ${allNpl.length} NPL citations. Call again with citations_offset=${citations_offset + max_citations} for the next page.` }),
-        hint: `To find patents that CITE ${document_number} (forward citations), use search_patents with query: ct="${document_number}"`,
-      }, { grounding: true });
-    } catch (e) {
-      return errorResult(e);
-    }
-  }
-);
+    },
+    wrapJsonTool(client, getPatentCitations, { grounding: true }),
+  );
 }
