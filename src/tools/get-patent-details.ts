@@ -33,14 +33,15 @@ function normalise(n: string, inputFormat: string): { number: string; format: st
   return m ? { number: `${m[1]}.${m[2]}.${m[3]}`, format: "docdb" } : { number: n.trim(), format: inputFormat };
 }
 
-async function getPatentDetails(
+type GetPatentDetailsArgs = {
+  document_number: string;
+  document_numbers?: string[];
+  input_format: string;
+};
+
+export async function getPatentDetails(
   client: EpoClient,
-  { errorResult, jsonResult }: ReturnType<typeof createHelpers>,
-  { document_number, document_numbers, input_format }: {
-    document_number: string;
-    document_numbers?: string[];
-    input_format: string;
-  },
+  { document_number, document_numbers, input_format }: GetPatentDetailsArgs,
 ) {
   client.startToolCall();
   async function fetchOne(n: string, fmt: string): Promise<PatentBiblio[]> {
@@ -85,7 +86,7 @@ async function getPatentDetails(
       const results = dedupe(allBiblio);
       const foundKeys = have();
       const notFound = document_numbers.filter((d) => !foundKeys.has(baseNumber(d)));
-      return jsonResult({
+      return {
         requested: document_numbers.length,
         found: document_numbers.length - notFound.length,
         results,
@@ -93,7 +94,7 @@ async function getPatentDetails(
         ...(notFound.length > 0 && {
           note: `${notFound.length} of ${document_numbers.length} numbers returned no bibliographic record in ${input_format} format: ${notFound.join(", ")}. Do not cite them as existing. SPC/certificate numbers (kind I1/I2/C1) and some US grants resolve only with input_format="docdb" and a kind code, e.g. "US.8354509.B2".`,
         }),
-      }, { grounding: true });
+      };
     }
 
     // Single mode
@@ -102,13 +103,13 @@ async function getPatentDetails(
     let records = dedupe(parseBiblio(raw).filter((b) => !isStub(b)));
     if (records.length === 0 && one.format === "epodoc") records = dedupe(await fetchByKinds(one.number));
     if (records.length === 0) {
-      return jsonResult({
+      return {
         found: false,
         documentNumber: document_number,
         note: `OPS returned no bibliographic data for ${document_number} in ${input_format} format. Do not cite it as existing. Retry with input_format="docdb" and a kind code (e.g. "${document_number.replace(/^([A-Z]{2})(\d+).*$/, "$1.$2.B2")}"), or verify with search_patents(query='pn="${document_number}"', count_only=true).`,
-      }, { grounding: true });
+      };
     }
-    return jsonResult(records, { grounding: true });
+    return records;
   } catch (e) {
     // On 404 in epodoc mode, retry with docdb format using common kind codes
     if (e instanceof OpsApiError && e.status === 404 && input_format === "epodoc") {
@@ -118,19 +119,31 @@ async function getPatentDetails(
         for (const kind of ["B2", "B1", "A1", "A2"]) {
           try {
             const raw = await client.getBiblio(`${cc}.${num}.${kind}`, "docdb");
-            return jsonResult(parseBiblio(raw), { grounding: true });
+            return parseBiblio(raw);
           } catch {
             // try next kind code
           }
         }
       }
     }
-    return errorResult(e);
+    throw e;
+  }
+}
+
+async function getPatentDetailsMcp(
+  client: EpoClient,
+  args: GetPatentDetailsArgs,
+) {
+  const helpers = createHelpers(client);
+  try {
+
+    return helpers.jsonResult(await getPatentDetails(client, args), { grounding: true });
+  } catch (e) {
+    return helpers.errorResult(e);
   }
 }
 
 export function registerGetPatentDetails(server: McpServer, client: EpoClient) {
-  const helpers = createHelpers(client);
 
   server.registerTool(
     "get_patent_details",
@@ -167,6 +180,6 @@ Batch mode: pass document_numbers (array of up to 100 numbers) to retrieve multi
       },
       annotations: { readOnlyHint: true },
     },
-    async (args) => getPatentDetails(client, helpers, args),
+    async (args) => getPatentDetailsMcp(client, args),
   );
 }
