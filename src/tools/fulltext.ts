@@ -2,11 +2,20 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { EpoClient } from "../epo-client.js";
 import { parseFulltextParagraphs, paginateParagraphs } from "../parsers.js";
-import { createHelpers } from "../helpers.js";
+import { wrapJsonTool } from "../helpers.js";
 import { fetchWithFamilyFallback, substitutionNote } from "../fallback.js";
 import { documentNumberParam, inputFormatParam, fallbackToFamilyParam } from "./params.js";
 
 type FulltextSection = "claims" | "description";
+
+type FulltextArgs = {
+  document_number: string;
+  input_format: string;
+  offset: number;
+  limit?: number;
+  max_characters: number;
+  fallback_to_family: boolean;
+};
 
 const EMPTY_NOTES: Record<FulltextSection, (doc: string) => string> = {
   claims: (doc) =>
@@ -15,16 +24,49 @@ const EMPTY_NOTES: Record<FulltextSection, (doc: string) => string> = {
     `No description text found for ${doc}. Granted patents (B1/B2) are often not indexed in OPS full text. Try the A1/A2 version, or use get_patent_family to find a WO equivalent.`,
 };
 
+export async function getFulltext(
+  client: EpoClient,
+  section: FulltextSection,
+  fetcher: (docNum: string, fmt: string) => Promise<string>,
+  { document_number, input_format, offset, limit, max_characters, fallback_to_family }: FulltextArgs,
+) {
+  client.startToolCall();
+  const { raw, resolvedDocument, substituted } = fallback_to_family
+    ? await fetchWithFamilyFallback(client, document_number, input_format, fetcher)
+    : { raw: await fetcher(document_number, input_format), resolvedDocument: document_number, substituted: false };
+
+  const paragraphs = parseFulltextParagraphs(raw);
+  const result = paginateParagraphs(paragraphs, offset, limit, max_characters);
+
+  if (substituted) {
+    const note = substitutionNote(document_number, resolvedDocument, section, result.totalParagraphs === 0);
+    return { ...result, note, resolvedDocument };
+  }
+  if (result.totalParagraphs === 0) {
+    return {
+      ...result,
+      note: EMPTY_NOTES[section](document_number),
+    };
+  }
+  return result;
+}
+
+export async function getPatentClaims(client: EpoClient, args: FulltextArgs) {
+  return getFulltext(client, "claims", (d, f) => client.getClaims(d, f), args);
+}
+
+export async function getPatentDescription(client: EpoClient, args: FulltextArgs) {
+  return getFulltext(client, "description", (d, f) => client.getDescription(d, f), args);
+}
+
 function registerFulltextReader(
   server: McpServer,
   client: EpoClient,
   section: FulltextSection,
-  fetcher: (docNum: string, fmt: string) => Promise<string>,
+  fetcher: (client: EpoClient, args: FulltextArgs) => Promise<unknown>,
   description: string,
   maxCharactersDescribe: string
 ) {
-  const { errorResult, jsonResult } = createHelpers(client);
-
   server.registerTool(
     section === "claims" ? "get_patent_claims" : "get_patent_description",
     {
@@ -54,31 +96,7 @@ function registerFulltextReader(
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ document_number, input_format, offset, limit, max_characters, fallback_to_family }) => {
-      client.startToolCall();
-      try {
-        const { raw, resolvedDocument, substituted } = fallback_to_family
-          ? await fetchWithFamilyFallback(client, document_number, input_format, fetcher)
-          : { raw: await fetcher(document_number, input_format), resolvedDocument: document_number, substituted: false };
-
-        const paragraphs = parseFulltextParagraphs(raw);
-        const result = paginateParagraphs(paragraphs, offset, limit, max_characters);
-
-        if (substituted) {
-          const note = substitutionNote(document_number, resolvedDocument, section, result.totalParagraphs === 0);
-          return jsonResult({ ...result, note, resolvedDocument }, { grounding: true });
-        }
-        if (result.totalParagraphs === 0) {
-          return jsonResult({
-            ...result,
-            note: EMPTY_NOTES[section](document_number),
-          }, { grounding: true });
-        }
-        return jsonResult(result, { grounding: true });
-      } catch (e) {
-        return errorResult(e);
-      }
-    }
+    wrapJsonTool(client, fetcher, { grounding: true }),
   );
 }
 
@@ -87,7 +105,7 @@ export function registerGetPatentClaims(server: McpServer, client: EpoClient) {
     server,
     client,
     "claims",
-    (d, f) => client.getClaims(d, f),
+    getPatentClaims,
     `Read the claims of a patent with pagination support. Claims define the legal scope of the patent.
 
 IMPORTANT — LEGAL: Only quote or summarize text returned by this tool. Never fabricate claim language.
@@ -108,7 +126,7 @@ export function registerGetPatentDescription(server: McpServer, client: EpoClien
     server,
     client,
     "description",
-    (d, f) => client.getDescription(d, f),
+    getPatentDescription,
     `Read the description/specification of a patent with pagination. Descriptions can be 50,000-100,000+ characters.
 
 IMPORTANT — LEGAL: Only quote or summarize text returned by this tool. Never fabricate patent description content.
