@@ -1,9 +1,18 @@
-import type { ThrottleStatus } from "./epo-client.js";
+import { EpoClient, type ThrottleStatus } from "./epo-client.js";
 
 export const GROUNDING_NOTICE =
   "GROUNDING: Only patent numbers, dates, names, and text that appear in this response may be cited in your output. Never supplement with patent numbers from your own knowledge. When quoting patent claims or description passages, use the exact text returned here — do not paraphrase from memory.";
 
 type ThrottleSource = { lastThrottle: ThrottleStatus | null };
+
+export function createClient() {
+  const CONSUMER_KEY = process.env.PATENT_CONSUMER_KEY;
+  const CONSUMER_SECRET = process.env.PATENT_CONSUMER_SECRET_KEY;
+  if (!CONSUMER_KEY || !CONSUMER_SECRET) {
+    throw new Error("Missing PATENT_CONSUMER_KEY or PATENT_CONSUMER_SECRET_KEY environment variables");
+  }
+  return new EpoClient(CONSUMER_KEY, CONSUMER_SECRET);
+}
 
 export function createHelpers(client: ThrottleSource) {
   function errorResult(e: unknown) {
@@ -73,4 +82,20 @@ export function createHelpers(client: ThrottleSource) {
   }
 
   return { errorResult, jsonResult, appendThrottleInfo };
+}
+
+/** MCP handler that runs a standalone tool function and wraps the result with jsonResult / errorResult. */
+export function wrapJsonTool<TArgs>(
+  client: EpoClient,
+  run: (client: EpoClient, args: TArgs) => Promise<unknown>,
+  options: { grounding?: boolean } = {},
+) {
+  return async (args: TArgs) => {
+    const { jsonResult, errorResult } = createHelpers(client);
+    try {
+      return jsonResult(await run(client, args), options);
+    } catch (e) {
+      return errorResult(e);
+    }
+  };
 }

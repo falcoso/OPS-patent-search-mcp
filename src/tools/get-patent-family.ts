@@ -2,17 +2,84 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { EpoClient, OpsApiError } from "../epo-client.js";
 import { parseFamilyMembers, type FamilyMember } from "../parsers.js";
-import { createHelpers } from "../helpers.js";
+import { wrapJsonTool } from "../helpers.js";
 import { getFamilyWithFormatFallback } from "../fallback.js";
 import { documentNumberParam, inputFormatParam } from "./params.js";
 
-export function registerGetPatentFamily(server: McpServer, client: EpoClient) {
-  const { errorResult, jsonResult } = createHelpers(client);
+type GetPatentFamilyArgs = {
+  document_number: string;
+  input_format: string;
+  countries?: string[];
+  max_members: number;
+};
 
-server.registerTool(
-  "get_patent_family",
-  {
-    description: `Get all members of the INPADOC patent family for a document — i.e. all related publications across jurisdictions (EP, US, WO, JP, CN, etc.).
+function formatFamilyResult(
+  members: FamilyMember[],
+  documentNumber: string,
+  countries: string[] | undefined,
+  maxMembers: number,
+  resolvedAs: string,
+  extraNote?: string,
+) {
+  const counts = new Map<string, number>();
+  for (const m of members) counts.set(m.country || "??", (counts.get(m.country || "??") ?? 0) + 1);
+  const countByCountry = Object.fromEntries([...counts.entries()].sort((a, b) => b[1] - a[1]));
+  const wanted = countries && countries.length > 0 ? new Set(countries.map((c) => c.toUpperCase())) : null;
+  const filtered = wanted ? members.filter((m) => wanted.has((m.country || "").toUpperCase())) : members;
+  const shown = filtered.slice(0, maxMembers);
+  const notes: string[] = [];
+  if (resolvedAs !== documentNumber) notes.push(`Resolved ${documentNumber} as ${resolvedAs} (docdb format); the family endpoint did not accept the epodoc form.`);
+  if (wanted) notes.push(`Filtered to ${filtered.length} member(s) in ${[...wanted].join(", ")}.`);
+  if (shown.length < filtered.length) notes.push(`Showing ${shown.length} of ${filtered.length} members. Raise max_members or narrow with countries to see the rest.`);
+  if (extraNote) notes.push(extraNote);
+  return {
+    documentNumber,
+    familySize: members.length,
+    countByCountry,
+    returned: shown.length,
+    members: shown,
+    ...(notes.length > 0 && { note: notes.join(" ") }),
+  };
+}
+
+export async function getPatentFamily(
+  client: EpoClient,
+  { document_number, input_format, countries, max_members }: GetPatentFamilyArgs,
+) {
+  client.startToolCall();
+  try {
+    const { raw, resolvedAs } = await getFamilyWithFormatFallback(client, document_number, input_format);
+    return formatFamilyResult(parseFamilyMembers(raw), document_number, countries, max_members, resolvedAs);
+  } catch (e) {
+    // Handle "smaller chunks" error for very large patent families — retry without biblio
+    if (e instanceof OpsApiError && e.message.includes("smaller chunks")) {
+      try {
+        const { raw, resolvedAs } = await getFamilyWithFormatFallback(client, document_number, input_format, true);
+        return formatFamilyResult(
+          parseFamilyMembers(raw),
+          document_number,
+          countries,
+          max_members,
+          resolvedAs,
+          "Large family retrieved without biblio data; titles may be missing. Use get_patent_details on individual members.",
+        );
+      } catch {
+        return {
+          error: "family_too_large",
+          documentNumber: document_number,
+          note: `This patent has a very large INPADOC family that exceeds the OPS API response limit. Try requesting a specific family member instead (e.g., the WO or EP publication). You can find the WO publication number by searching: search_patents(query='pn="${document_number}"') or checking get_patent_details for priority claims.`,
+        };
+      }
+    }
+    throw e;
+  }
+}
+
+export function registerGetPatentFamily(server: McpServer, client: EpoClient) {
+  server.registerTool(
+    "get_patent_family",
+    {
+      description: `Get all members of the INPADOC patent family for a document — i.e. all related publications across jurisdictions (EP, US, WO, JP, CN, etc.).
 
 IMPORTANT — LEGAL: Only list family members returned by this tool. Never guess at family members or jurisdictions.
 
@@ -36,48 +103,6 @@ Response: { familySize, countByCountry, returned, members[] }. countByCountry al
     },
     annotations: { readOnlyHint: true },
   },
-  async ({ document_number, input_format, countries, max_members }) => {
-    client.startToolCall();
-    const shape = (members: FamilyMember[], resolvedAs: string, extraNote?: string) => {
-      const counts = new Map<string, number>();
-      for (const m of members) counts.set(m.country || "??", (counts.get(m.country || "??") ?? 0) + 1);
-      const countByCountry = Object.fromEntries([...counts.entries()].sort((a, b) => b[1] - a[1]));
-      const wanted = countries && countries.length > 0 ? new Set(countries.map((c) => c.toUpperCase())) : null;
-      const filtered = wanted ? members.filter((m) => wanted.has((m.country || "").toUpperCase())) : members;
-      const shown = filtered.slice(0, max_members);
-      const notes: string[] = [];
-      if (resolvedAs !== document_number) notes.push(`Resolved ${document_number} as ${resolvedAs} (docdb format); the family endpoint did not accept the epodoc form.`);
-      if (wanted) notes.push(`Filtered to ${filtered.length} member(s) in ${[...wanted].join(", ")}.`);
-      if (shown.length < filtered.length) notes.push(`Showing ${shown.length} of ${filtered.length} members. Raise max_members or narrow with countries to see the rest.`);
-      if (extraNote) notes.push(extraNote);
-      return jsonResult({
-        documentNumber: document_number,
-        familySize: members.length,
-        countByCountry,
-        returned: shown.length,
-        members: shown,
-        ...(notes.length > 0 && { note: notes.join(" ") }),
-      }, { grounding: true });
-    };
-    try {
-      const { raw, resolvedAs } = await getFamilyWithFormatFallback(client, document_number, input_format);
-      return shape(parseFamilyMembers(raw), resolvedAs);
-    } catch (e) {
-      // Handle "smaller chunks" error for very large patent families — retry without biblio
-      if (e instanceof OpsApiError && e.message.includes("smaller chunks")) {
-        try {
-          const { raw, resolvedAs } = await getFamilyWithFormatFallback(client, document_number, input_format, true);
-          return shape(parseFamilyMembers(raw), resolvedAs, "Large family retrieved without biblio data; titles may be missing. Use get_patent_details on individual members.");
-        } catch {
-          return jsonResult({
-            error: "family_too_large",
-            documentNumber: document_number,
-            note: `This patent has a very large INPADOC family that exceeds the OPS API response limit. Try requesting a specific family member instead (e.g., the WO or EP publication). You can find the WO publication number by searching: search_patents(query='pn="${document_number}"') or checking get_patent_details for priority claims.`,
-          });
-        }
-      }
-      return errorResult(e);
-    }
-  }
-);
+    wrapJsonTool(client, getPatentFamily, { grounding: true }),
+  );
 }
