@@ -17,6 +17,8 @@ Tests require valid `PATENT_CONSUMER_KEY` and `PATENT_CONSUMER_SECRET_KEY` env v
 
 This is a 3-file MCP server published as `ops-patent-search` on npm.
 
+**[references/ops-api/ops.yaml](references/ops-api/ops.yaml)** — OpenAPI (Swagger 2.0) specification for EPO OPS v3.2. Consult this when adding or changing API calls, request paths, parameters, or response shapes.
+
 **[src/epo-client.ts](src/epo-client.ts)** — HTTP client for the EPO OPS REST API (`https://ops.epo.org/3.2/rest-services`). Handles OAuth2 `client_credentials` token acquisition and caching (with 60s pre-expiry refresh). Throws `OpsApiError` with human-readable messages parsed from OPS XML error responses instead of raw XML.
 
 **[src/parsers.ts](src/parsers.ts)** — Transforms deeply nested/inconsistent OPS JSON into clean typed objects. Key exports:

@@ -280,6 +280,16 @@ export class EpoClient {
     );
   }
 
+  /** Fetch biblio by application number — yields the linked publication numbers. */
+  async getApplicationBiblio(
+    documentNumber: string,
+    inputFormat: string = "epodoc"
+  ): Promise<string> {
+    return this.request(
+      `/published-data/application/${inputFormat}/${encodeURIComponent(documentNumber)}/biblio`
+    );
+  }
+
   /** Fetch biblio for multiple documents in one request (comma-separated in URL path). */
   async getBiblioMulti(
     documentNumbers: string[],
