@@ -9,7 +9,6 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { EpoClient } from "./epo-client.js";
 import { registerSearchPatents } from "./tools/search-patents.js";
 import { registerGetPatentDetails } from "./tools/get-patent-details.js";
 import { registerGetPatentClaims, registerGetPatentDescription } from "./tools/fulltext.js";
@@ -18,18 +17,9 @@ import { registerSearchAndFilterFulltext } from "./tools/search-and-filter.js";
 import { registerGetPatentFamily } from "./tools/get-patent-family.js";
 import { registerGetPatentLegalStatus } from "./tools/get-patent-legal-status.js";
 import { registerGetPatentCitations } from "./tools/get-patent-citations.js";
+import { createClient } from "./helpers.js";
 
-const CONSUMER_KEY = process.env.PATENT_CONSUMER_KEY;
-const CONSUMER_SECRET = process.env.PATENT_CONSUMER_SECRET_KEY;
-
-if (!CONSUMER_KEY || !CONSUMER_SECRET) {
-  console.error(
-    "Missing PATENT_CONSUMER_KEY or PATENT_CONSUMER_SECRET_KEY environment variables"
-  );
-  process.exit(1);
-}
-
-const client = new EpoClient(CONSUMER_KEY, CONSUMER_SECRET);
+const client = createClient();
 
 const server = new McpServer({
   name: "ops-patent-search",
