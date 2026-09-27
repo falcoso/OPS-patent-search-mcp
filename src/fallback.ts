@@ -1,92 +1,12 @@
 import { EpoClient, OpsApiError } from "./epo-client.js";
-import { DocNumber, DocType, OpsFormat, type FormatCandidate } from "./doc-number.js";
-import { parseBiblio, parseFamilyMembers } from "./parsers.js";
+import { OpsFormat } from "./doc-number.js";
+import { parseFamilyMembers } from "./parsers.js";
+import {
+  resolveAndFetch,
+  type Fetcher,
+} from "./resolve.js";
 
-/** 404 or OPS "ambiguous" — try the next spelling; anything else is fatal. */
-function shouldTryNext(e: unknown): e is OpsApiError {
-  return (
-    e instanceof OpsApiError &&
-    (e.status === 404 || /ambiguous/i.test(e.message))
-  );
-}
-
-/** Build docdb publication candidates from application biblio records, in OPS order. */
-function publicationsFromApplicationBiblio(raw: string): FormatCandidate[] {
-  const out: FormatCandidate[] = [];
-  for (const b of parseBiblio(raw)) {
-    if (!b.kindCode) continue;
-    try {
-      const doc = new DocNumber(`${b.publicationNumber}${b.kindCode}`);
-      if (doc.type !== DocType.Publication) continue;
-      out.push({ number: doc.docdb(), format: OpsFormat.Docdb });
-    } catch {
-      continue;
-    }
-  }
-  return out;
-}
-
-/**
- * Resolve a document number to an OPS spelling that the fetcher accepts.
- * Applications are mapped to publications via getApplicationBiblio first.
- * Tries each candidate on 404 / ambiguous; other errors are rethrown.
- */
-export async function resolveAndFetch(
-  client: EpoClient,
-  documentNumber: string,
-  fetcher: (docNum: string, fmt: string) => Promise<string>
-): Promise<{ raw: string; resolvedAs: string; format: OpsFormat }> {
-  const doc = new DocNumber(documentNumber);
-  const tried: string[] = [];
-  let firstError: OpsApiError | null = null;
-  let candidates: FormatCandidate[];
-
-  if (doc.type === DocType.Publication) {
-    candidates = doc.formatCandidates();
-  } else {
-    candidates = [];
-    for (const c of doc.applicationCandidates()) {
-      tried.push(`${c.format}:${c.number}`);
-      try {
-        const appRaw = await client.getApplicationBiblio(c.number, c.format);
-        candidates = publicationsFromApplicationBiblio(appRaw);
-        if (candidates.length > 0) break;
-      } catch (e) {
-        if (!shouldTryNext(e)) throw e;
-        if (!firstError) firstError = e;
-      }
-    }
-    if (candidates.length === 0) {
-      const err =
-        firstError ??
-        new OpsApiError(404, `No publications found for application ${doc.input}`);
-      throw new OpsApiError(
-        err.status,
-        `${err.message} Tried: ${tried.join(", ")}.`,
-        err.code
-      );
-    }
-  }
-
-  for (const c of candidates) {
-    tried.push(`${c.format}:${c.number}`);
-    try {
-      const raw = await fetcher(c.number, c.format);
-      return { raw, resolvedAs: c.number, format: c.format };
-    } catch (e) {
-      if (!shouldTryNext(e)) throw e;
-      if (!firstError) firstError = e;
-    }
-  }
-
-  const err =
-    firstError ?? new OpsApiError(404, `Document not found: ${doc.input}`);
-  throw new OpsApiError(
-    err.status,
-    `${err.message} Tried: ${tried.join(", ")}.`,
-    err.code
-  );
-}
+export { resolveAndFetch } from "./resolve.js";
 
 /**
  * Fetch a patent family, resolving format/kind (and application → publication)
@@ -114,7 +34,7 @@ export async function getFamilyWithFormatFallback(
 export async function fetchWithFamilyFallback(
   client: EpoClient,
   documentNumber: string,
-  fetcher: (docNum: string, fmt: string) => Promise<string>
+  fetcher: Fetcher
 ): Promise<{ raw: string; resolvedDocument: string; substituted: boolean }> {
   try {
     const { raw, resolvedAs } = await resolveAndFetch(client, documentNumber, fetcher);
@@ -168,7 +88,7 @@ export async function fetchWithFamilyFallback(
     // Docdb format expected by OPS: CC.number.KK  e.g. EP.3750919.A1
     const docdbNum = `${member.country}.${member.rawNumber}.${member.kind}`;
     try {
-      const raw = await fetcher(docdbNum, "docdb");
+      const raw = await fetcher(docdbNum, OpsFormat.Docdb);
       return { raw, resolvedDocument: docdbNum, substituted: true };
     } catch {
       // try next member
