@@ -19,7 +19,14 @@ import { registerGetPatentLegalStatus } from "./tools/get-patent-legal-status.js
 import { registerGetPatentCitations } from "./tools/get-patent-citations.js";
 import { createClient } from "./helpers.js";
 
-const client = createClient();
+const client = (() => {
+  try {
+    return createClient();
+  } catch (e) {
+    console.error(e instanceof Error ? e.message : String(e));
+    process.exit(1);
+  }
+})();
 
 const server = new McpServer({
   name: "ops-patent-search",
