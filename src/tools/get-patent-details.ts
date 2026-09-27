@@ -113,7 +113,7 @@ export async function getPatentDetails(
     const unresolved = notFound.filter((d) => !parseFailures.some((p) => p.number === d));
     if (unresolved.length > 0) {
       notes.push(
-        `${notFound.length} of ${document_numbers.length} numbers returned no bibliographic record: ${notFound.join(", ")}. Do not cite them as existing. SPC/certificate numbers (kind I1/I2/C1) have no bibliographic record — look up the basic patent instead.`
+        `${unresolved.length} of ${document_numbers.length} numbers returned no bibliographic record: ${unresolved.join(", ")}. Do not cite them as existing. SPC/certificate numbers (kind I1/I2/C1) have no bibliographic record — look up the basic patent instead.`
       );
     }
     return {
@@ -169,7 +169,7 @@ IMPORTANT — LEGAL: Only present data returned by this tool. Never fabricate or
 Use this when you already have a publication number and need its details. For searching by topic or applicant, use search_patents instead.
 
 Document number formats:
-  epodoc (default): "EP1000000", "US2020001234", "WO2023123456"
+  epodoc: "EP1000000", "US2020001234", "WO2023123456"
   docdb: "EP.1000000.A1" (country.number.kind — more precise)
 
 Accepts common written forms (publication or application; kind code optional), e.g. "EP1393417", "EP.1393417.B1", "US 2024/0318857 A1", "EP02729749", "PCT/US2020/012345". Including a kind code selects that exact publication stage; without one, all stages for the number may be returned.

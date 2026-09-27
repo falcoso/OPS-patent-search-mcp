@@ -18,10 +18,10 @@
     "prepublishOnly": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
-    "test": "npm run test:unit && set -a && [ -f .env ] && . ./.env; set +a && npx tsx tests/integration.ts",
+    "test": "npm run test:unit && set -a && [ -f .env ] && . ./.env && set +a && npx tsx tests/integration.ts",
     "test:unit": "npx tsx tests/doc-number.ts",
-    "test:integration": "set -a && [ -f .env ] && . ./.env; set +a && npx tsx tests/integration.ts",
-    "test:scenarios": "set -a && [ -f .env ] && . ./.env; set +a && npx tsx integration_tests/run-all.ts"
+    "test:integration": "set -a && [ -f .env ] && . ./.env && set +a && npx tsx tests/integration.ts",
+    "test:scenarios": "set -a && [ -f .env ] && . ./.env && set +a && npx tsx integration_tests/run-all.ts"
   },
   "keywords": [
     "mcp",
