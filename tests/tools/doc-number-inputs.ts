@@ -154,4 +154,36 @@ export const testDocNumberInputs: ToolTestSuite = async (_client, test) => {
     },
     true /* ignoreIsError — error result is the expected outcome */
   );
+
+  await test(
+    "search_in_patent_text: garbage input names accepted shapes",
+    "search_in_patent_text",
+    { document_number: "not-a-patent", search_terms: ["anything"] },
+    (r) => {
+      const text = r.content[0].text;
+      if (!/Cannot parse|Accepted shapes/i.test(text))
+        return `Expected parse-error naming accepted shapes, got: ${text.slice(0, 200)}`;
+      return null;
+    },
+    true /* ignoreIsError — error result is the expected outcome */
+  );
+
+  await test(
+    "Details batch: one found, one notFound",
+    "get_patent_details",
+    { document_numbers: [EP_PUB, "EP9876543"] },
+    (r) => {
+      const data = parsePayload(r) as {
+        found?: number;
+        notFound?: string[];
+        results?: unknown[];
+      };
+      if (data.found !== 1) return `Expected found=1, got ${data.found}`;
+      if (!Array.isArray(data.notFound) || !data.notFound.includes("EP9876543"))
+        return `Expected EP9876543 in notFound, got: ${JSON.stringify(data.notFound)}`;
+      if (!Array.isArray(data.results) || data.results.length === 0)
+        return "Expected results for the found number";
+      return null;
+    }
+  );
 };
