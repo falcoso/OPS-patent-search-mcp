@@ -5,21 +5,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-npm run build      # Compile TypeScript → dist/
-npm run dev        # Run directly with tsx (no build required)
-npm run start      # Run compiled dist/index.js
-npm test           # Run integration tests against live EPO OPS API (requires credentials in .env)
+npm run build           # Compile TypeScript → dist/
+npm run dev             # Run directly with tsx (no build required)
+npm run start           # Run compiled dist/index.js
+npm run test:unit       # Offline parser tests (no credentials)
+npm test                # Unit tests, then live OPS integration tests (needs .env)
 ```
 
-Tests require valid `PATENT_CONSUMER_KEY` and `PATENT_CONSUMER_SECRET_KEY` env vars and make real API calls.
+Integration tests require valid `PATENT_CONSUMER_KEY` and `PATENT_CONSUMER_SECRET_KEY` env vars and make real API calls.
 
 ## Architecture
 
-This is a 3-file MCP server published as `ops-patent-search` on npm.
+MCP server published as `ops-patent-search` on npm. Tools live under `src/tools/`; shared OPS logic is in the modules below.
 
 **[references/ops-api/ops.yaml](references/ops-api/ops.yaml)** — OpenAPI (Swagger 2.0) specification for EPO OPS v3.2. Consult this when adding or changing API calls, request paths, parameters, or response shapes.
 
-**[src/epo-client.ts](src/epo-client.ts)** — HTTP client for the EPO OPS REST API (`https://ops.epo.org/3.2/rest-services`). Handles OAuth2 `client_credentials` token acquisition and caching (with 60s pre-expiry refresh). Throws `OpsApiError` with human-readable messages parsed from OPS XML error responses instead of raw XML.
+**[src/epo-client.ts](src/epo-client.ts)** — HTTP client for the EPO OPS REST API (`https://ops.epo.org/3.2/rest-services`). Handles OAuth2 `client_credentials` token acquisition and caching (with 60s pre-expiry refresh). Throws `OpsApiError` with human-readable messages parsed from OPS XML error responses instead of raw XML. Includes publication and application biblio, fulltext, family, and legal endpoints.
+
+**[src/doc-number.ts](src/doc-number.ts)** — Pure parser for document numbers. `new DocNumber(raw)` classifies publication vs application and emits ordered OPS spellings via `formatCandidates()` / `applicationCandidates()` (epodoc and docdb, with kind-code fallbacks). No network I/O.
+
+**[src/fallback.ts](src/fallback.ts)** — Resolution and family fallback. `resolveAndFetch` walks candidates from a `DocNumber` (applications first hit `getApplicationBiblio`, then the linked publications). Retries on 404 / ambiguous. `fetchWithFamilyFallback` uses that resolver, then on fulltext 404 walks INPADOC family members (EP/WO/GB/DE/FR first) in docdb form.
 
 **[src/parsers.ts](src/parsers.ts)** — Transforms deeply nested/inconsistent OPS JSON into clean typed objects. Key exports:
 - `parseSearchResults` / `parseBiblio` / `parseFamilyMembers` — structured metadata
@@ -27,16 +32,16 @@ This is a 3-file MCP server published as `ops-patent-search` on npm.
 - `paginateParagraphs` — slices a paragraph array by offset+limit+maxCharacters, returns `nextOffset` for continuation
 - `searchKeywordsInParagraphs` — regex-based keyword search across paragraphs, returns snippets with `paragraphIndex` usable as `offset` in the reading tools
 
-**[src/index.ts](src/index.ts)** — MCP server wiring. Defines 9 tools using `@modelcontextprotocol/sdk` and `zod` for parameter schemas. Runs on stdio transport. Tool descriptions contain the LLM-facing instructions for when/how to use each tool.
+**[src/index.ts](src/index.ts)** — MCP server entry. Registers the 9 tools from `src/tools/` using `@modelcontextprotocol/sdk` and `zod`. Runs on stdio transport. Tool descriptions contain the LLM-facing instructions for when/how to use each tool.
 
 Tools: `search_patents`, `get_patent_details`, `get_patent_claims`, `get_patent_description`, `search_in_patent_text`, `search_and_filter_fulltext`, `get_patent_family`, `get_patent_legal_status`, `get_patent_citations`.
 
 ## Key design constraints
 
 - **Pagination everywhere**: Full patent descriptions can be 50K–100K+ characters. `get_patent_claims` and `get_patent_description` always paginate via `offset`/`limit`/`max_characters`. The `search_in_patent_text` tool exists so the LLM can locate relevant paragraphs before doing expensive full reads.
-- **Family fallback**: `get_patent_claims`, `get_patent_description`, and `search_in_patent_text` have `fallback_to_family=true` by default. On a 404, `fetchWithFamilyFallback` (in `index.ts`) looks up the INPADOC family and retries against EP/WO/GB/DE/FR members in priority order using docdb format.
+- **Family fallback**: `get_patent_claims`, `get_patent_description`, and `search_in_patent_text` have `fallback_to_family=true` by default. On a 404 after format resolution, `fetchWithFamilyFallback` (in `fallback.ts`) looks up the INPADOC family and retries against EP/WO/GB/DE/FR members in priority order using docdb format.
 - **404 = no results, not an error**: `search_patents` catches `OpsApiError` with status 404 and returns `{totalCount: 0, results: []}` instead of propagating.
-- **Document number formats**: EPO OPS accepts `epodoc` (e.g. `EP1000000`), `docdb` (e.g. `EP.1000000.A1` with kind code), and `original`. Full text often requires `docdb` with an explicit kind code.
+- **Document numbers**: Accept common written forms (publication or application; kind code optional). `DocNumber` parses them; `resolveAndFetch` chooses epodoc/docdb spellings. Prefer padded US application-publication numbers (e.g. `US20240318857`). Application numbers (EP serial, PCT/…) are resolved to publications via the application biblio endpoint before other fetches. Under the hood OPS still wants `epodoc` or `docdb` (with kind code for many fulltext/family calls) — never send a literal `PCT/…` path.
 - **Environment variables**: `PATENT_CONSUMER_KEY` and `PATENT_CONSUMER_SECRET_KEY` — the server exits immediately on startup if either is missing. Optional: `OPS_TOOL_TIMEOUT_MS` (default 55000) — total time budget per tool call. The server tracks the clock and bails with an actionable error before the MCP client timeout hits. Raise to e.g. 120000 for Claude Code or other clients with longer timeouts.
 - **Forward citations via search**: Forward citations (patents citing a document) are retrieved via `search_patents` with CQL `ct="EP1000000"`, not a dedicated endpoint. `get_patent_citations` covers backward citations only.
 

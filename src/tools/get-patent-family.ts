@@ -44,17 +44,17 @@ function formatFamilyResult(
 
 export async function getPatentFamily(
   client: EpoClient,
-  { document_number, input_format, countries, max_members }: GetPatentFamilyArgs,
+  { document_number, countries, max_members }: GetPatentFamilyArgs,
 ) {
   client.startToolCall();
   try {
-    const { raw, resolvedAs } = await getFamilyWithFormatFallback(client, document_number, input_format);
+    const { raw, resolvedAs } = await getFamilyWithFormatFallback(client, document_number);
     return formatFamilyResult(parseFamilyMembers(raw), document_number, countries, max_members, resolvedAs);
   } catch (e) {
     // Handle "smaller chunks" error for very large patent families — retry without biblio
     if (e instanceof OpsApiError && e.message.includes("smaller chunks")) {
       try {
-        const { raw, resolvedAs } = await getFamilyWithFormatFallback(client, document_number, input_format, true);
+        const { raw, resolvedAs } = await getFamilyWithFormatFallback(client, document_number, true);
         return formatFamilyResult(
           parseFamilyMembers(raw),
           document_number,

@@ -1,113 +1,148 @@
 import { EpoClient, OpsApiError } from "./epo-client.js";
-import { parseFamilyMembers } from "./parsers.js";
+import { DocNumber, DocType, OpsFormat, type FormatCandidate } from "./doc-number.js";
+import { parseBiblio, parseFamilyMembers } from "./parsers.js";
 
-/** Compute alternative kind codes to try for a document number before family fallback. */
-export function computeKindFallbacks(docNumber: string, inputFormat: string): string[] {
-  // Only works for epodoc-style numbers where we can extract country+number
-  if (inputFormat === "docdb") {
-    // docdb format: CC.number.KK — extract parts and try other kind codes
-    const parts = docNumber.split(".");
-    if (parts.length === 3) {
-      const [cc, num, currentKind] = parts;
-      // Only try A1/B1 — covers >90% of cases without excessive API calls
-      return ["A1", "B1"]
-        .filter((k) => k !== currentKind)
-        .map((k) => `${cc}.${num}.${k}`);
+/** 404 or OPS "ambiguous" — try the next spelling; anything else is fatal. */
+function shouldTryNext(e: unknown): e is OpsApiError {
+  return (
+    e instanceof OpsApiError &&
+    (e.status === 404 || /ambiguous/i.test(e.message))
+  );
+}
+
+/** Build docdb publication candidates from application biblio records, in OPS order. */
+function publicationsFromApplicationBiblio(raw: string): FormatCandidate[] {
+  const out: FormatCandidate[] = [];
+  for (const b of parseBiblio(raw)) {
+    if (!b.kindCode) continue;
+    try {
+      const doc = new DocNumber(`${b.publicationNumber}${b.kindCode}`);
+      if (doc.type !== DocType.Publication) continue;
+      out.push({ number: doc.docdb(), format: OpsFormat.Docdb });
+    } catch {
+      continue;
     }
-    return [];
   }
-  // epodoc: e.g. EP1000000 — try docdb format with A1/B1 kind codes
-  const m = docNumber.match(/^([A-Z]{2})(.+)$/);
-  if (!m) return [];
-  const [, cc, num] = m;
-  return ["A1", "B1"].map((k) => `${cc}.${num}.${k}`);
+  return out;
 }
 
 /**
- * The OPS family endpoint rejects some numbers in epodoc format that the
- * biblio endpoint accepts (US application publications such as US2023233694,
- * some WO numbers). Those resolve in docdb format with an explicit kind code.
- * Retry with the common kind codes before giving up so that get_patent_family
- * and the full-text family fallback do not dead-end on documents that
- * get_patent_details just returned.
+ * Resolve a document number to an OPS spelling that the fetcher accepts.
+ * Applications are mapped to publications via getApplicationBiblio first.
+ * Tries each candidate on 404 / ambiguous; other errors are rethrown.
+ */
+export async function resolveAndFetch(
+  client: EpoClient,
+  documentNumber: string,
+  fetcher: (docNum: string, fmt: string) => Promise<string>
+): Promise<{ raw: string; resolvedAs: string; format: OpsFormat }> {
+  const doc = new DocNumber(documentNumber);
+  const tried: string[] = [];
+  let firstError: OpsApiError | null = null;
+  let candidates: FormatCandidate[];
+
+  if (doc.type === DocType.Publication) {
+    candidates = doc.formatCandidates();
+  } else {
+    candidates = [];
+    for (const c of doc.applicationCandidates()) {
+      tried.push(`${c.format}:${c.number}`);
+      try {
+        const appRaw = await client.getApplicationBiblio(c.number, c.format);
+        candidates = publicationsFromApplicationBiblio(appRaw);
+        if (candidates.length > 0) break;
+      } catch (e) {
+        if (!shouldTryNext(e)) throw e;
+        if (!firstError) firstError = e;
+      }
+    }
+    if (candidates.length === 0) {
+      const err =
+        firstError ??
+        new OpsApiError(404, `No publications found for application ${doc.input}`);
+      throw new OpsApiError(
+        err.status,
+        `${err.message} Tried: ${tried.join(", ")}.`,
+        err.code
+      );
+    }
+  }
+
+  for (const c of candidates) {
+    tried.push(`${c.format}:${c.number}`);
+    try {
+      const raw = await fetcher(c.number, c.format);
+      return { raw, resolvedAs: c.number, format: c.format };
+    } catch (e) {
+      if (!shouldTryNext(e)) throw e;
+      if (!firstError) firstError = e;
+    }
+  }
+
+  const err =
+    firstError ?? new OpsApiError(404, `Document not found: ${doc.input}`);
+  throw new OpsApiError(
+    err.status,
+    `${err.message} Tried: ${tried.join(", ")}.`,
+    err.code
+  );
+}
+
+/**
+ * Fetch a patent family, resolving format/kind (and application → publication)
+ * via resolveAndFetch. Pass light=true for the no-biblio variant used when OPS
+ * refuses a large family with "smaller chunks".
  */
 export async function getFamilyWithFormatFallback(
   client: EpoClient,
-  docNumber: string,
-  inputFormat: string,
+  documentNumber: string,
   light = false
-): Promise<{ raw: string; resolvedAs: string }> {
-  const fetch = (d: string, f: string) => (light ? client.getFamilyLight(d, f) : client.getFamily(d, f));
-  try {
-    return { raw: await fetch(docNumber, inputFormat), resolvedAs: docNumber };
-  } catch (e) {
-    if (!(e instanceof OpsApiError) || e.status !== 404 || inputFormat !== "epodoc") throw e;
-    const m = docNumber.match(/^([A-Z]{2})(\d+)$/);
-    if (!m) throw e;
-    const [, cc, num] = m;
-    for (const kind of ["A1", "A2", "B1", "B2", "A", "B"]) {
-      const alt = `${cc}.${num}.${kind}`;
-      try {
-        return { raw: await fetch(alt, "docdb"), resolvedAs: alt };
-      } catch (inner) {
-        if (!(inner instanceof OpsApiError) || inner.status !== 404) throw inner;
-      }
-    }
-    throw e;
-  }
+): Promise<{ raw: string; resolvedAs: string; format: OpsFormat }> {
+  return resolveAndFetch(client, documentNumber, (d, f) =>
+    light ? client.getFamilyLight(d, f) : client.getFamily(d, f)
+  );
 }
 
 /**
  * Try to fetch fulltext (claims or description) for a document.
- * If the initial fetch returns 404, fetch the patent family and try
- * EP/WO members first (most reliably indexed in OPS), then others.
+ * Resolves format/kind/application via resolveAndFetch first. If that
+ * returns 404, fetch the patent family and try EP/WO members first
+ * (most reliably indexed in OPS), then others.
  * Returns the raw JSON, the document that succeeded, and whether a
  * family substitution was made.
  */
 export async function fetchWithFamilyFallback(
   client: EpoClient,
-  docNumber: string,
-  inputFormat: string,
+  documentNumber: string,
   fetcher: (docNum: string, fmt: string) => Promise<string>
 ): Promise<{ raw: string; resolvedDocument: string; substituted: boolean }> {
   try {
-    const raw = await fetcher(docNumber, inputFormat);
-    return { raw, resolvedDocument: docNumber, substituted: false };
+    const { raw, resolvedAs } = await resolveAndFetch(client, documentNumber, fetcher);
+    return { raw, resolvedDocument: resolvedAs, substituted: false };
   } catch (e) {
     if (!(e instanceof OpsApiError) || e.status !== 404) throw e;
-  }
-
-  // 404 — try alternative kind codes for the same patent before family lookup
-  const kindFallbacks = computeKindFallbacks(docNumber, inputFormat);
-  for (const alt of kindFallbacks) {
-    try {
-      const raw = await fetcher(alt, "docdb");
-      return { raw, resolvedDocument: alt, substituted: true };
-    } catch {
-      // try next kind code
-    }
   }
 
   // Still 404 — try the patent family
   let familyRaw: string;
   try {
-    familyRaw = (await getFamilyWithFormatFallback(client, docNumber, inputFormat)).raw;
+    familyRaw = (await getFamilyWithFormatFallback(client, documentNumber)).raw;
   } catch (e) {
     // Very large families (Xencor, Immunomedics) are refused with "smaller
     // chunks"; the light variant still lists members, which is all we need.
     if (e instanceof OpsApiError && e.message.includes("smaller chunks")) {
       try {
-        familyRaw = (await getFamilyWithFormatFallback(client, docNumber, inputFormat, true)).raw;
+        familyRaw = (await getFamilyWithFormatFallback(client, documentNumber, true)).raw;
       } catch {
         throw new OpsApiError(
           404,
-          `Full text not available for ${docNumber} and could not retrieve patent family for fallback.`
+          `Full text not available for ${documentNumber} and could not retrieve patent family for fallback.`
         );
       }
     } else {
       throw new OpsApiError(
         404,
-        `Full text not available for ${docNumber} and could not retrieve patent family for fallback.`
+        `Full text not available for ${documentNumber} and could not retrieve patent family for fallback.`
       );
     }
   }
@@ -116,7 +151,7 @@ export async function fetchWithFamilyFallback(
   if (members.length === 0) {
     throw new OpsApiError(
       404,
-      `Full text not available for ${docNumber} and no family members found.`
+      `Full text not available for ${documentNumber} and no family members found.`
     );
   }
 
@@ -142,7 +177,7 @@ export async function fetchWithFamilyFallback(
 
   throw new OpsApiError(
     404,
-    `Full text not available for ${docNumber} or any of its ${members.length} family member(s). ` +
+    `Full text not available for ${documentNumber} or any of its ${members.length} family member(s). ` +
       `Family includes: ${members
         .slice(0, 8)
         .map((m) => m.publicationNumber)

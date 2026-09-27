@@ -32,7 +32,7 @@ export async function getFulltext(
 ) {
   client.startToolCall();
   const { raw, resolvedDocument, substituted } = fallback_to_family
-    ? await fetchWithFamilyFallback(client, document_number, input_format, fetcher)
+    ? await fetchWithFamilyFallback(client, document_number, fetcher)
     : { raw: await fetcher(document_number, input_format), resolvedDocument: document_number, substituted: false };
 
   const paragraphs = parseFulltextParagraphs(raw);

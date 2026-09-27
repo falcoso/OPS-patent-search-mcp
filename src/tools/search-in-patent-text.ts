@@ -46,7 +46,6 @@ export async function searchInPatentText(
     try {
       const result = await fetchWithFamilyFallback(client,
         document_number,
-        input_format,
         (d, f) => client.getClaims(d, f)
       );
       claimsRaw = result.raw;
@@ -60,11 +59,9 @@ export async function searchInPatentText(
 
     // Try description — prefer the same resolved document if claims already substituted
     const descDoc = substituted ? resolvedClaimsDoc : document_number;
-    const descFmt = substituted ? "docdb" : input_format;
     try {
       const result = await fetchWithFamilyFallback(client,
         descDoc,
-        descFmt,
         (d, f) => client.getDescription(d, f)
       );
       descRaw = result.raw;
