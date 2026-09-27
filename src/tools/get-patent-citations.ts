@@ -3,21 +3,23 @@ import { z } from "zod";
 import type { EpoClient } from "../epo-client.js";
 import { parseCitations } from "../parsers.js";
 import { wrapJsonTool } from "../helpers.js";
-import { documentNumberParam, inputFormatParam } from "./params.js";
+import { resolveAndFetch } from "../fallback.js";
+import { documentNumberParam } from "./params.js";
 
 type GetPatentCitationsArgs = {
   document_number: string;
-  input_format: string;
   max_citations: number;
   citations_offset: number;
 };
 
 export async function getPatentCitations(
   client: EpoClient,
-  { document_number, input_format, max_citations, citations_offset }: GetPatentCitationsArgs,
+  { document_number, max_citations, citations_offset }: GetPatentCitationsArgs,
 ) {
   client.startToolCall();
-  const raw = await client.getBiblio(document_number, input_format);
+  const { raw, resolvedAs } = await resolveAndFetch(client, document_number, (d, f) =>
+    client.getBiblio(d, f)
+  );
   const citations = parseCitations(raw);
   const allPatent = citations.filter((c) => c.type === "patent");
   const allNpl = citations.filter((c) => c.type === "npl");
@@ -26,6 +28,7 @@ export async function getPatentCitations(
   const truncated = allPatent.length > citations_offset + max_citations || allNpl.length > citations_offset + max_citations;
   return {
     documentNumber: document_number,
+    ...(resolvedAs !== document_number && { resolvedAs }),
     totalCitations: citations.length,
     patentCitationCount: allPatent.length,
     nplCitationCount: allNpl.length,
@@ -60,7 +63,6 @@ Returns patent citations (with publication numbers) and non-patent literature ci
 To find forward citations — patents that cite a given document — use search_patents with the CQL query: ct="EP1000000" (replace with the target document number).`,
     inputSchema: {
       document_number: documentNumberParam,
-      input_format: inputFormatParam,
       max_citations: z
         .number()
         .int()

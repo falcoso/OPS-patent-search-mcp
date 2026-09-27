@@ -1,8 +1,11 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { EpoClient, OpsApiError } from "../epo-client.js";
+import { DocNumber, DocType, type FormatCandidate } from "../doc-number.js";
 import { parseBiblio, type PatentBiblio } from "../parsers.js";
 import { wrapJsonTool } from "../helpers.js";
+import { resolveAndFetch } from "../fallback.js";
+import { documentNumberParam } from "./params.js";
 
 // OPS answers an unknown number with an exchange-document that has no
 // bibliographic content. Returning that as a record made "not found" look
@@ -26,105 +29,130 @@ function baseNumber(s: string) {
   return s.replace(/[^A-Za-z0-9]/g, "").toUpperCase().replace(/(?<=\d)[A-Z]\d?$/, "");
 }
 
-// Citation lists and family members carry kind suffixes ("US7169874B2"),
-// which the epodoc endpoint rejects. Route those through docdb instead.
-function normalise(n: string, inputFormat: string): { number: string; format: string } {
-  const m = inputFormat === "epodoc" ? n.trim().match(/^([A-Z]{2})(\d+)([A-Z]\d?)$/) : null;
-  return m ? { number: `${m[1]}.${m[2]}.${m[3]}`, format: "docdb" } : { number: n.trim(), format: inputFormat };
-}
+type PubEntry = { requested: string; first: FormatCandidate };
+type OkEntry = { requested: string };
 
 type GetPatentDetailsArgs = {
   document_number: string;
   document_numbers?: string[];
-  input_format: string;
 };
 
 export async function getPatentDetails(
   client: EpoClient,
-  { document_number, document_numbers, input_format }: GetPatentDetailsArgs,
+  { document_number, document_numbers }: GetPatentDetailsArgs,
 ) {
   client.startToolCall();
-  async function fetchOne(n: string, fmt: string): Promise<PatentBiblio[]> {
-    try { return parseBiblio(await client.getBiblio(n, fmt)).filter((b) => !isStub(b)); } catch { return []; }
-  }
-  // Last resort for a number nothing else resolved: docdb with the common kind codes.
-  async function fetchByKinds(n: string): Promise<PatentBiblio[]> {
-    const m = n.match(/^([A-Z]{2})(\d+)$/);
-    if (!m) return [];
-    for (const kind of ["B2", "B1", "A1", "A2", "A", "B"]) {
-      const got = await fetchOne(`${m[1]}.${m[2]}.${kind}`, "docdb");
-      if (got.length > 0) return got;
-    }
-    return [];
-  }
-  try {
-    // Batch mode
-    if (document_numbers && document_numbers.length > 0) {
-      const allBiblio: PatentBiblio[] = [];
-      const entries = document_numbers.map((d) => ({ requested: d, ...normalise(d, input_format) }));
-      // The multi-number endpoint is unreliable: one unknown number fails the
-      // whole request, and pairs of US grants are refused outright. Try it per
-      // format in chunks of 20, then recover every missing number individually.
-      for (const fmt of [...new Set(entries.map((e) => e.format))]) {
-        const nums = entries.filter((e) => e.format === fmt).map((e) => e.number);
-        for (let i = 0; i < nums.length; i += 20) {
-          const chunk = nums.slice(i, i + 20);
-          try {
-            allBiblio.push(...parseBiblio(await client.getBiblioMulti(chunk, fmt)).filter((b) => !isStub(b)));
-          } catch {
-            // recovered per number below
-          }
+
+  // Batch mode
+  if (document_numbers && document_numbers.length > 0) {
+    const allBiblio: PatentBiblio[] = [];
+    const resolvedRequested = new Set<string>();
+    const parseFailures: { number: string; reason: string }[] = [];
+    const pubs: PubEntry[] = [];
+    const recoverable: OkEntry[] = [];
+
+    for (const d of document_numbers) {
+      try {
+        const doc = new DocNumber(d);
+        recoverable.push({ requested: d });
+        if (doc.type === DocType.Publication) {
+          pubs.push({ requested: d, first: doc.formatCandidates()[0] });
         }
+      } catch (e) {
+        parseFailures.push({ number: d, reason: e instanceof Error ? e.message : String(e) });
       }
-      const have = () => new Set(allBiblio.map((b) => baseNumber(b.publicationNumber)));
-      let missing = entries.filter((e) => !have().has(baseNumber(e.requested)));
-      for (const e of missing.slice(0, 40)) allBiblio.push(...(await fetchOne(e.number, e.format)));
-      missing = entries.filter((e) => !have().has(baseNumber(e.requested)));
-      for (const e of missing.slice(0, 15)) {
-        if (e.format === "epodoc") allBiblio.push(...(await fetchByKinds(e.number)));
-      }
-      const results = dedupe(allBiblio);
-      const foundKeys = have();
-      const notFound = document_numbers.filter((d) => !foundKeys.has(baseNumber(d)));
-      return {
-        requested: document_numbers.length,
-        found: document_numbers.length - notFound.length,
-        results,
-        notFound,
-        ...(notFound.length > 0 && {
-          note: `${notFound.length} of ${document_numbers.length} numbers returned no bibliographic record in ${input_format} format: ${notFound.join(", ")}. Do not cite them as existing. SPC/certificate numbers (kind I1/I2/C1) and some US grants resolve only with input_format="docdb" and a kind code, e.g. "US.8354509.B2".`,
-        }),
-      };
     }
 
-    // Single mode
-    const one = normalise(document_number, input_format);
-    const raw = await client.getBiblio(one.number, one.format);
-    let records = dedupe(parseBiblio(raw).filter((b) => !isStub(b)));
-    if (records.length === 0 && one.format === "epodoc") records = dedupe(await fetchByKinds(one.number));
+    // The multi-number endpoint is unreliable: one unknown number fails the
+    // whole request, and pairs of US grants are refused outright. Try it per
+    // first-candidate format in chunks of 20; applications and parse failures
+    // skip this and are recovered individually below.
+    for (const fmt of [...new Set(pubs.map((e) => e.first.format))]) {
+      const nums = pubs.filter((e) => e.first.format === fmt).map((e) => e.first.number);
+      for (let i = 0; i < nums.length; i += 20) {
+        const chunk = nums.slice(i, i + 20);
+        try {
+          allBiblio.push(...parseBiblio(await client.getBiblioMulti(chunk, fmt)).filter((b) => !isStub(b)));
+        } catch {
+          // recovered per number below
+        }
+      }
+    }
+
+    const have = () => new Set(allBiblio.map((b) => baseNumber(b.publicationNumber)));
+    for (const e of pubs) {
+      if (have().has(baseNumber(e.requested)) || have().has(baseNumber(e.first.number))) {
+        resolvedRequested.add(e.requested);
+      }
+    }
+
+    // Last resort (cap 40): resolveAndFetch walks remaining spellings on 404.
+    // Previously also treated an empty/stub biblio body (HTTP 200, no content)
+    // as a miss so the next spelling would be tried; that check was removed.
+    const missing = recoverable.filter((e) => !resolvedRequested.has(e.requested));
+    for (const e of missing.slice(0, 40)) {
+      try {
+        const { raw } = await resolveAndFetch(client, e.requested, (d, f) =>
+          client.getBiblio(d, f)
+        );
+        allBiblio.push(...parseBiblio(raw).filter((b) => !isStub(b)));
+        resolvedRequested.add(e.requested);
+      } catch {
+        // leave unresolved
+      }
+    }
+
+    const results = dedupe(allBiblio);
+    const notFound = document_numbers.filter((d) => !resolvedRequested.has(d));
+    const notes: string[] = [];
+    if (parseFailures.length > 0) {
+      notes.push(
+        `${parseFailures.length} number(s) could not be parsed: ${parseFailures.map((p) => `${p.number} (${p.reason})`).join("; ")}.`
+      );
+    }
+    const unresolved = notFound.filter((d) => !parseFailures.some((p) => p.number === d));
+    if (unresolved.length > 0) {
+      notes.push(
+        `${notFound.length} of ${document_numbers.length} numbers returned no bibliographic record: ${notFound.join(", ")}. Do not cite them as existing. SPC/certificate numbers (kind I1/I2/C1) have no bibliographic record — look up the basic patent instead.`
+      );
+    }
+    return {
+      requested: document_numbers.length,
+      found: document_numbers.length - notFound.length,
+      results,
+      notFound,
+      ...(notes.length > 0 && { note: notes.join(" ") }),
+    };
+  }
+
+  // Single mode:resolveAndFetch retries on 404 with docdb/kind spellings.
+  try {
+    const { raw, resolvedAs } = await resolveAndFetch(client, document_number, (d, f) =>
+      client.getBiblio(d, f)
+    );
+    const records = dedupe(parseBiblio(raw).filter((b) => !isStub(b)));
     if (records.length === 0) {
       return {
         found: false,
         documentNumber: document_number,
-        note: `OPS returned no bibliographic data for ${document_number} in ${input_format} format. Do not cite it as existing. Retry with input_format="docdb" and a kind code (e.g. "${document_number.replace(/^([A-Z]{2})(\d+).*$/, "$1.$2.B2")}"), or verify with search_patents(query='pn="${document_number}"', count_only=true).`,
+        note: `OPS returned no bibliographic data for ${document_number}. Do not cite it as existing. Add a kind code (e.g. "EP.1393417.B1") or verify with search_patents(query='pn="${document_number}"', count_only=true).`,
+      };
+    }
+    if (resolvedAs !== document_number) {
+      return {
+        results: records,
+        resolvedAs,
+        note: `Resolved ${document_number} as ${resolvedAs}.`,
       };
     }
     return records;
   } catch (e) {
-    // On 404 in epodoc mode, retry with docdb format using common kind codes
-    if (e instanceof OpsApiError && e.status === 404 && input_format === "epodoc") {
-      const m = document_number.match(/^([A-Z]{2})(.+)$/);
-      if (m) {
-        const [, cc, num] = m;
-        for (const kind of ["B2", "B1", "A1", "A2"]) {
-          try {
-            const raw = await client.getBiblio(`${cc}.${num}.${kind}`, "docdb");
-            return parseBiblio(raw);
-          } catch {
-            // try next kind code
-          }
-        }
-      }
+    if (e instanceof OpsApiError && e.status === 404) {
+      return {
+        found: false,
+        documentNumber: document_number,
+        note: `OPS returned no bibliographic data for ${document_number}. Do not cite it as existing. Add a kind code or verify with search_patents(query='pn="${document_number}"', count_only=true).`,
+      };
     }
     throw e;
   }
@@ -144,25 +172,20 @@ Document number formats:
   epodoc (default): "EP1000000", "US2020001234", "WO2023123456"
   docdb: "EP.1000000.A1" (country.number.kind — more precise)
 
-Response: one record per publication stage of the number, each with kindCode (A1/A2 = application, B1/B2 = grant). A number with an A1 and a B1 publication therefore returns two records with different publicationDate values.
+Accepts common written forms (publication or application; kind code optional), e.g. "EP1393417", "EP.1393417.B1", "US 2024/0318857 A1", "EP02729749", "PCT/US2020/012345". Including a kind code selects that exact publication stage; without one, all stages for the number may be returned.
 
-Numbers with a kind suffix, as returned by get_patent_citations and get_patent_family ("US7169874B2"), are accepted and resolved precisely. A number that fails in epodoc format is retried with the common kind codes before it is reported missing.
+Response: one record per publication stage of the number, each with kindCode (A1/A2 = application, B1/B2 = grant). A number with an A1 and a B1 publication therefore returns two records with different publicationDate values. When the input was respelled or resolved from an application number, resolvedAs is included.
 
 Batch mode: pass document_numbers (array of up to 100 numbers) to retrieve multiple patents in one call. When using batch mode, document_number is ignored. The batch response is an object: { requested, found, results, notFound }. notFound lists the requested numbers that returned no bibliographic record after all retries, so a missing patent is never silent. Keep batches to about 10 numbers when you need abstracts: 13 full records already exceed the client's 25K-token result limit and get redirected to a file. SPC and certificate numbers (kind I1/I2/C1) have no bibliographic record; look up the basic patent instead.`,
       inputSchema: {
-        document_number: z
-          .string()
-          .default("")
-          .describe('Patent publication number, e.g. "EP1000000" or "US2020001234". Ignored when document_numbers is provided.'),
+        document_number: documentNumberParam.default("").describe(
+          'Patent publication or application number, e.g. "EP1393417" or "EP02729749". Ignored when document_numbers is provided.'
+        ),
         document_numbers: z
           .array(z.string())
           .max(100)
           .optional()
           .describe('Batch mode: array of patent numbers to retrieve in one call (max 100). More efficient than calling one at a time.'),
-        input_format: z
-          .enum(["epodoc", "docdb", "original"])
-          .default("epodoc")
-          .describe('Number format. Use "docdb" (e.g. "EP.1000000.A1") when epodoc returns errors.'),
       },
       annotations: { readOnlyHint: true },
     },

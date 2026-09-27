@@ -3,14 +3,13 @@ import { z } from "zod";
 import type { EpoClient } from "../epo-client.js";
 import { parseFulltextParagraphs, paginateParagraphs } from "../parsers.js";
 import { wrapJsonTool } from "../helpers.js";
-import { fetchWithFamilyFallback, substitutionNote } from "../fallback.js";
-import { documentNumberParam, inputFormatParam, fallbackToFamilyParam } from "./params.js";
+import { fetchWithFamilyFallback, resolveAndFetch, substitutionNote } from "../fallback.js";
+import { documentNumberParam, fallbackToFamilyParam } from "./params.js";
 
 type FulltextSection = "claims" | "description";
 
 type FulltextArgs = {
   document_number: string;
-  input_format: string;
   offset: number;
   limit?: number;
   max_characters: number;
@@ -28,12 +27,16 @@ export async function getFulltext(
   client: EpoClient,
   section: FulltextSection,
   fetcher: (docNum: string, fmt: string) => Promise<string>,
-  { document_number, input_format, offset, limit, max_characters, fallback_to_family }: FulltextArgs,
+  { document_number, offset, limit, max_characters, fallback_to_family }: FulltextArgs,
 ) {
   client.startToolCall();
   const { raw, resolvedDocument, substituted } = fallback_to_family
     ? await fetchWithFamilyFallback(client, document_number, fetcher)
-    : { raw: await fetcher(document_number, input_format), resolvedDocument: document_number, substituted: false };
+    : await resolveAndFetch(client, document_number, fetcher).then((r) => ({
+        raw: r.raw,
+        resolvedDocument: r.resolvedAs,
+        substituted: false,
+      }));
 
   const paragraphs = parseFulltextParagraphs(raw);
   const result = paginateParagraphs(paragraphs, offset, limit, max_characters);
@@ -46,9 +49,13 @@ export async function getFulltext(
     return {
       ...result,
       note: EMPTY_NOTES[section](document_number),
+      ...(resolvedDocument !== document_number && { resolvedAs: resolvedDocument }),
     };
   }
-  return result;
+  return {
+    ...result,
+    ...(resolvedDocument !== document_number && { resolvedAs: resolvedDocument }),
+  };
 }
 
 export async function getPatentClaims(client: EpoClient, args: FulltextArgs) {
@@ -73,7 +80,6 @@ function registerFulltextReader(
       description,
       inputSchema: {
         document_number: documentNumberParam,
-        input_format: inputFormatParam.describe('Number format. Try "docdb" with kind code if epodoc fails for fulltext.'),
         offset: z
           .number()
           .int()
@@ -110,7 +116,7 @@ export function registerGetPatentClaims(server: McpServer, client: EpoClient) {
 
 IMPORTANT — LEGAL: Only quote or summarize text returned by this tool. Never fabricate claim language.
 
-Full text is available primarily for EP, WO, and US patents. If you get a "not available" error, try docdb format with a kind code (e.g. "EP.1000000.A1").
+Full text is available primarily for EP, WO, and US patents. If you get a "not available" error, add a kind code (e.g. "EP1393417A1" or "EP.1393417.A1") or try a different publication stage.
 
 When fallback_to_family is true (default), a 404 will automatically trigger a family lookup and retry against the best available EP/WO equivalent — useful when US or other national documents lack full text in OPS.
 
