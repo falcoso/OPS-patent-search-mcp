@@ -72,14 +72,13 @@ export class DocNumber {
       }
     }
 
-    // EP20020729749 — YYYY + 7-digit serial (epodoc). Short/docdb form is
+    // EP20020729749 — YYYY + 0 + 6-digit serial (epodoc). Short/docdb form is
     // YY + 6-digit serial: year 2002 + 0729749 ↔ 02729749.
     {
-      const m = s.match(/^EP\s*?(19|20)(\d{2})(\d{7})$/);
+      const m = s.match(/^EP\s*?(19|20)(\d{2})0(\d{6})$/);
       if (m) {
         const year = m[1] + m[2];
-        const serial7 = m[3];
-        const serial6 = serial7.startsWith("0") ? serial7.slice(1) : serial7;
+        const serial6 = m[3];
         this.type = DocType.Application;
         this.country = "EP";
         this.year = year;

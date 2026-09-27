@@ -100,6 +100,18 @@ check("US 11,234,567 is publication (not application)", () => {
   assert.equal(new DocNumber("US 11,234,567").type, DocType.Publication);
 });
 
+// EP year-form requires the 7-digit serial to start with 0 (YYYY + 0 + 6 digits).
+check("EP20020729749 is year-form application", () => {
+  const d = new DocNumber("EP20020729749");
+  assert.equal(d.type, DocType.Application);
+  assert.equal(d.year, "2002");
+  assert.equal(d.number, "02729749");
+});
+check("EP20021234567 is not year-form (serial7 must start with 0)", () => {
+  const d = new DocNumber("EP20021234567");
+  assert.notEqual(d.type === DocType.Application && d.year === "2002", true);
+});
+
 // PCT vs WO publication
 check("PCT/US2020/012345 is application; WO 2020/123456 is publication", () => {
   assert.equal(new DocNumber("PCT/US2020/012345").type, DocType.Application);
