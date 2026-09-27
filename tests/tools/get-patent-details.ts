@@ -18,7 +18,7 @@ export const testGetPatentDetails: ToolTestSuite = async (_client, test) => {
   await test(
     "Biblio (docdb format)",
     "get_patent_details",
-    { document_number: "EP.3750919.A1", input_format: "docdb" },
+    { document_number: "EP.3750919.A1" },
     (r) => {
       const data = JSON.parse(r.content[0].text);
       return Array.isArray(data) && data.length > 0 ? null : "Expected biblio records";

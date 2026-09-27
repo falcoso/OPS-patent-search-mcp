@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { EpoClient } from "../epo-client.js";
 import { parseSearchResults, parseFulltextParagraphs, searchKeywordsInParagraphs } from "../parsers.js";
 import { wrapJsonTool } from "../helpers.js";
-import { fetchWithFamilyFallback } from "../fallback.js";
+import { fetchFulltext } from "../fallback.js";
 import { fallbackToFamilyParam } from "./params.js";
 import { buildDateCql } from "../search.js";
 
@@ -91,29 +91,25 @@ export async function searchAndFilterFulltext(
 
     if (wantClaims) {
       try {
-        if (fallback_to_family) {
-          const r = await fetchWithFamilyFallback(client, doc, "epodoc", (d, f) => client.getClaims(d, f));
-          claimsRaw = r.raw;
-          if (r.substituted) substitutedFrom = r.resolvedDocument;
-        } else {
-          claimsRaw = await client.getClaims(doc, "epodoc");
-        }
+        const r = await fetchFulltext(client, doc, (d, f) => client.getClaims(d, f), {
+          family: fallback_to_family,
+        });
+        claimsRaw = r.raw;
+        if (r.substituted) substitutedFrom = r.resolvedAs;
       } catch {
-        // no claims for this document
+        // no claims for this document — numbers come from OPS search, so skip
       }
     }
 
     if (wantDesc && client.timeRemaining >= RESERVE_MS) {
       try {
-        const srcDoc = substitutedFrom ?? doc;
-        const srcFmt = substitutedFrom ? "docdb" : "epodoc";
-        if (fallback_to_family) {
-          const r = await fetchWithFamilyFallback(client, srcDoc, srcFmt, (d, f) => client.getDescription(d, f));
-          descRaw = r.raw;
-          if (r.substituted) substitutedFrom = r.resolvedDocument;
-        } else {
-          descRaw = await client.getDescription(srcDoc, srcFmt);
-        }
+        // Prefer the same publication that already yielded claims (family substitute).
+        const srcDoc = claimsRaw ? (substitutedFrom ?? doc) : doc;
+        const r = await fetchFulltext(client, srcDoc, (d, f) => client.getDescription(d, f), {
+          family: fallback_to_family,
+        });
+        descRaw = r.raw;
+        if (r.substituted) substitutedFrom = r.resolvedAs;
       } catch {
         // no description for this document
       }

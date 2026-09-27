@@ -23,6 +23,7 @@ import {
 } from "./helpers.js";
 import { testSearchPatents } from "./tools/search-patents.js";
 import { testGetPatentDetails } from "./tools/get-patent-details.js";
+import { testDocNumberInputs } from "./tools/doc-number-inputs.js";
 import { testFulltext } from "./tools/fulltext.js";
 import { testSearchInPatentText } from "./tools/search-in-patent-text.js";
 import { testSearchAndFilter } from "./tools/search-and-filter.js";
@@ -33,6 +34,7 @@ import { testGetPatentCitations } from "./tools/get-patent-citations.js";
 const SUITES: Array<{ label: string; run: ToolTestSuite }> = [
   { label: "search-patents", run: testSearchPatents },
   { label: "get-patent-details", run: testGetPatentDetails },
+  { label: "doc-number-inputs", run: testDocNumberInputs },
   { label: "fulltext", run: testFulltext },
   { label: "search-in-patent-text", run: testSearchInPatentText },
   { label: "search-and-filter", run: testSearchAndFilter },

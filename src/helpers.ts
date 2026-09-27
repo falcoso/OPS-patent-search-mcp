@@ -21,7 +21,7 @@ export function createHelpers(client: ThrottleSource) {
     const parts = [`Error: ${msg}`];
     if (/ambiguous/i.test(msg)) {
       parts.push(
-        `\nHint: OPS found several publications for this number (e.g. A1 and B1). Give a kind code in docdb format, e.g. "EP.1234567.B1", or use epodoc format ("EP1234567") to take the first one.`
+        `\nHint: OPS found several publications for this number (e.g. A1 and B1). Include a kind code to select one, e.g. "EP1234567B1" or "EP.1234567.B1".`
       );
     }
     if (/3 characters required when '\*'/i.test(msg)) {

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Patent Search MCP Server v1.0.1
+ * Patent Search MCP Server v2.0.0
  *
  * Patent search and retrieval via EPO Open Patent Services (OPS) API.
  * Designed for agentic use: keyword search + paginated reading prevent
@@ -9,7 +9,6 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { EpoClient } from "./epo-client.js";
 import { registerSearchPatents } from "./tools/search-patents.js";
 import { registerGetPatentDetails } from "./tools/get-patent-details.js";
 import { registerGetPatentClaims, registerGetPatentDescription } from "./tools/fulltext.js";
@@ -18,22 +17,20 @@ import { registerSearchAndFilterFulltext } from "./tools/search-and-filter.js";
 import { registerGetPatentFamily } from "./tools/get-patent-family.js";
 import { registerGetPatentLegalStatus } from "./tools/get-patent-legal-status.js";
 import { registerGetPatentCitations } from "./tools/get-patent-citations.js";
+import { createClient } from "./helpers.js";
 
-const CONSUMER_KEY = process.env.PATENT_CONSUMER_KEY;
-const CONSUMER_SECRET = process.env.PATENT_CONSUMER_SECRET_KEY;
-
-if (!CONSUMER_KEY || !CONSUMER_SECRET) {
-  console.error(
-    "Missing PATENT_CONSUMER_KEY or PATENT_CONSUMER_SECRET_KEY environment variables"
-  );
-  process.exit(1);
-}
-
-const client = new EpoClient(CONSUMER_KEY, CONSUMER_SECRET);
+const client = (() => {
+  try {
+    return createClient();
+  } catch (e) {
+    console.error(e instanceof Error ? e.message : String(e));
+    process.exit(1);
+  }
+})();
 
 const server = new McpServer({
   name: "ops-patent-search",
-  version: "1.0.1",
+  version: "2.0.0",
 });
 
 registerSearchPatents(server, client);
@@ -49,7 +46,7 @@ registerGetPatentCitations(server, client);
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Patent Search MCP server v1.0.1 running on stdio");
+  console.error("Patent Search MCP server v2.0.0 running on stdio");
 }
 
 main().catch((e) => {

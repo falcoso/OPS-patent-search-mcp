@@ -1,15 +1,14 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { EpoClient } from "../epo-client.js";
+import { EpoClient, OpsApiError } from "../epo-client.js";
 import { parseFulltextParagraphs, searchKeywordsInParagraphs } from "../parsers.js";
 import { wrapJsonTool } from "../helpers.js";
-import { fetchWithFamilyFallback } from "../fallback.js";
-import { documentNumberParam, inputFormatParam, fallbackToFamilyParam } from "./params.js";
+import { fetchFulltext } from "../fallback.js";
+import { documentNumberParam, fallbackToFamilyParam } from "./params.js";
 
 type SearchInPatentTextArgs = {
   document_number: string;
   search_terms: string[];
-  input_format: string;
   context_chars: number;
   limit: number;
   case_sensitive: boolean;
@@ -22,7 +21,6 @@ export async function searchInPatentText(
   {
     document_number,
     search_terms,
-    input_format,
     context_chars,
     limit,
     case_sensitive,
@@ -32,57 +30,46 @@ export async function searchInPatentText(
 ) {
   client.startToolCall();
 
-  // Resolve the best available document for fulltext
   let resolvedClaimsDoc = document_number;
   let resolvedDescDoc = document_number;
   let substituted = false;
 
-  // Fetch both claims and description — falling back to family if needed
   let claimsRaw: string | null = null;
   let descRaw: string | null = null;
 
-  if (fallback_to_family) {
-    // Try claims with fallback
-    try {
-      const result = await fetchWithFamilyFallback(client,
-        document_number,
-        input_format,
-        (d, f) => client.getClaims(d, f)
-      );
-      claimsRaw = result.raw;
-      if (result.substituted) {
-        resolvedClaimsDoc = result.resolvedDocument;
-        substituted = true;
-      }
-    } catch {
-      // claims unavailable
-    }
+  try {
+    const result = await fetchFulltext(
+      client,
+      document_number,
+      (d, f) => client.getClaims(d, f),
+      { family: fallback_to_family }
+    );
+    claimsRaw = result.raw;
+    resolvedClaimsDoc = result.resolvedAs;
+    if (result.substituted) substituted = true;
+  } catch (e) {
+    if (!(e instanceof OpsApiError)) throw e;
+  }
 
-    // Try description — prefer the same resolved document if claims already substituted
-    const descDoc = substituted ? resolvedClaimsDoc : document_number;
-    const descFmt = substituted ? "docdb" : input_format;
-    try {
-      const result = await fetchWithFamilyFallback(client,
-        descDoc,
-        descFmt,
-        (d, f) => client.getDescription(d, f)
-      );
-      descRaw = result.raw;
-      if (result.substituted) {
-        resolvedDescDoc = result.resolvedDocument;
-        substituted = true;
-      }
-    } catch {
-      // description unavailable
-    }
-  } else {
-    claimsRaw = await client.getClaims(document_number, input_format).catch(() => null);
-    descRaw = await client.getDescription(document_number, input_format).catch(() => null);
+  // Reuse the claims spelling whenever claims succeeded (not only after family substitution).
+  const descDoc = claimsRaw ? resolvedClaimsDoc : document_number;
+  try {
+    const result = await fetchFulltext(
+      client,
+      descDoc,
+      (d, f) => client.getDescription(d, f),
+      { family: fallback_to_family }
+    );
+    descRaw = result.raw;
+    resolvedDescDoc = result.resolvedAs;
+    if (result.substituted) substituted = true;
+  } catch (e) {
+    if (!(e instanceof OpsApiError)) throw e;
   }
 
   if (!claimsRaw && !descRaw) {
     throw new Error(
-      `No full text available for ${document_number}. Full text is only available for EP, WO, US and some other offices. Try docdb format with a kind code (e.g. "EP.1000000.A1"), or enable fallback_to_family to search a family equivalent automatically.`,
+      `No full text available for ${document_number}. Full text is only available for EP, WO, US and some other offices. Add a kind code (e.g. "EP1393417A1") or enable fallback_to_family to search a family equivalent automatically.`,
     );
   }
 
@@ -132,6 +119,9 @@ export async function searchInPatentText(
   if (substituted) {
     result.note = `Full text not available for ${document_number}. Search performed against family member(s): claims from ${resolvedClaimsDoc}, description from ${resolvedDescDoc}.`;
     result.resolvedDocuments = { claims: resolvedClaimsDoc, description: resolvedDescDoc };
+  } else if (resolvedClaimsDoc !== document_number || resolvedDescDoc !== document_number) {
+    result.resolvedAs =
+      resolvedClaimsDoc !== document_number ? resolvedClaimsDoc : resolvedDescDoc;
   }
 
   return result;
@@ -158,7 +148,6 @@ Full text is available primarily for EP, WO, and US patents.`,
           .array(z.string())
           .min(1)
           .describe('Keywords to search for, e.g. ["kinase", "inhibitor", "pharmaceutical"]'),
-        input_format: inputFormatParam,
         context_chars: z
           .number()
           .int()

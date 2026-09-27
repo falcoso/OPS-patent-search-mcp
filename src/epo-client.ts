@@ -85,7 +85,7 @@ function parseOpsError(status: number, body: string, path: string): OpsApiError 
     if (path.includes("/claims") || path.includes("/description")) {
       return new OpsApiError(
         404,
-        `Full text not available for this document. Try using docdb format with a kind code (e.g. "EP.1000000.A1") or a different publication.`,
+        `Full text not available for this document. Try adding a kind code (e.g. "EP1000000A1" or "EP.1000000.A1") or a different publication.`,
         code
       );
     }
@@ -277,6 +277,16 @@ export class EpoClient {
   ): Promise<string> {
     return this.request(
       `/published-data/publication/${inputFormat}/${encodeURIComponent(documentNumber)}/biblio`
+    );
+  }
+
+  /** Fetch biblio by application number — yields the linked publication numbers. */
+  async getApplicationBiblio(
+    documentNumber: string,
+    inputFormat: string = "epodoc"
+  ): Promise<string> {
+    return this.request(
+      `/published-data/application/${inputFormat}/${encodeURIComponent(documentNumber)}/biblio`
     );
   }
 

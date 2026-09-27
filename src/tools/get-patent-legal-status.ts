@@ -1,45 +1,26 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { EpoClient, OpsApiError } from "../epo-client.js";
+import type { EpoClient } from "../epo-client.js";
 import { parseLegalEvents, type LegalEvent } from "../parsers.js";
 import { wrapJsonTool } from "../helpers.js";
 import { isGrantEvent, isSpcEvent, summarizeLegalStatus } from "../legal.js";
-import { documentNumberParam, inputFormatParam } from "./params.js";
+import { resolveAndFetch } from "../resolve.js";
+import { documentNumberParam } from "./params.js";
 
 type GetPatentLegalStatusArgs = {
   document_number: string;
-  input_format: string;
   event_types?: Array<"grant" | "lapse" | "opposition" | "spc_pte" | "withdrawal" | "abandonment" | "fee_payment">;
   condensed: boolean;
 };
 
 export async function getPatentLegalStatus(
   client: EpoClient,
-  { document_number, input_format, event_types, condensed }: GetPatentLegalStatusArgs,
+  { document_number, event_types, condensed }: GetPatentLegalStatusArgs,
 ) {
   client.startToolCall();
-  // Same epodoc gap as the family endpoint: some US publications resolve
-  // only in docdb format with a kind code.
-  let raw: string;
-  let resolvedAs = document_number;
-  try {
-    raw = await client.getLegalStatus(document_number, input_format);
-  } catch (e) {
-    const m = input_format === "epodoc" ? document_number.match(/^([A-Z]{2})(\d+)$/) : null;
-    if (!(e instanceof OpsApiError) || e.status !== 404 || !m) throw e;
-    let recovered: string | null = null;
-    for (const kind of ["A1", "B2", "B1", "A2", "A", "B"]) {
-      try {
-        recovered = await client.getLegalStatus(`${m[1]}.${m[2]}.${kind}`, "docdb");
-        resolvedAs = `${m[1]}.${m[2]}.${kind}`;
-        break;
-      } catch {
-        // next kind
-      }
-    }
-    if (!recovered) throw e;
-    raw = recovered;
-  }
+  const { raw, resolvedAs } = await resolveAndFetch(client, document_number, (d, f) =>
+    client.getLegalStatus(d, f)
+  );
   const events = parseLegalEvents(raw);
 
   // Derive a high-level status summary from event codes/descriptions
@@ -92,7 +73,7 @@ export async function getPatentLegalStatus(
 
   return {
     documentNumber: document_number,
-    ...(resolvedAs !== document_number && { resolvedAs, note: `Resolved ${document_number} as ${resolvedAs} (docdb format).` }),
+    ...(resolvedAs !== document_number && { resolvedAs, note: `Resolved ${document_number} as ${resolvedAs}.` }),
     statusSummary,
     totalEvents: events.length,
     filteredEvents: filteredEvents.length,
@@ -123,8 +104,7 @@ Returns a statusSummary object with:
 
 Plus the full list of raw legal events. Each event now includes refCountryCode (contracting state), effectiveDate, freeText, and yearOfFeePayment when available from the OPS data.`,
     inputSchema: {
-      document_number: documentNumberParam.describe('Patent publication number, e.g. "EP1000000" or "US10000000"'),
-      input_format: inputFormatParam,
+      document_number: documentNumberParam,
       event_types: z
         .array(z.enum(["grant", "lapse", "opposition", "spc_pte", "withdrawal", "abandonment", "fee_payment"]))
         .optional()

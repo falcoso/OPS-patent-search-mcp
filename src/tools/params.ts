@@ -2,12 +2,9 @@ import { z } from "zod";
 
 export const documentNumberParam = z
   .string()
-  .describe('Patent publication number, e.g. "EP1000000"');
-
-export const inputFormatParam = z
-  .enum(["epodoc", "docdb", "original"])
-  .default("epodoc")
-  .describe("Number format");
+  .describe(
+    'Publication or application number in any common written form, e.g. "EP1393417", "EP.1393417.B1", "US 2024/0318857 A1", "EP02729749", "PCT/US2020/012345". Kind code optional; including it (e.g. B1) selects that exact publication.'
+  );
 
 export const fallbackToFamilyParam = z
   .boolean()
