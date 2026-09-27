@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Patent Search MCP Server v1.0.1
+ * Patent Search MCP Server v2.0.0
  *
  * Patent search and retrieval via EPO Open Patent Services (OPS) API.
  * Designed for agentic use: keyword search + paginated reading prevent
@@ -23,7 +23,7 @@ const client = createClient();
 
 const server = new McpServer({
   name: "ops-patent-search",
-  version: "1.0.1",
+  version: "2.0.0",
 });
 
 registerSearchPatents(server, client);
@@ -39,7 +39,7 @@ registerGetPatentCitations(server, client);
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Patent Search MCP server v1.0.1 running on stdio");
+  console.error("Patent Search MCP server v2.0.0 running on stdio");
 }
 
 main().catch((e) => {
