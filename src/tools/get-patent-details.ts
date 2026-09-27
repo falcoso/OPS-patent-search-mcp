@@ -1,18 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { EpoClient, OpsApiError } from "../epo-client.js";
-import { DocNumber, DocType, type FormatCandidate } from "../doc-number.js";
 import { parseBiblio, type PatentBiblio } from "../parsers.js";
 import { wrapJsonTool } from "../helpers.js";
-import { resolveAndFetch } from "../fallback.js";
+import { fetchBiblio, fetchBiblioBatch, isStub } from "../resolve.js";
 import { documentNumberParam } from "./params.js";
-
-// OPS answers an unknown number with an exchange-document that has no
-// bibliographic content. Returning that as a record made "not found" look
-// like "a patent with no title", which agents then cited.
-function isStub(b: PatentBiblio) {
-  return !b.title && !b.abstract && b.applicants.length === 0 && !b.applicationNumber;
-}
 
 function dedupe(records: PatentBiblio[]) {
   const seen = new Set<string>();
@@ -23,14 +15,6 @@ function dedupe(records: PatentBiblio[]) {
     return true;
   });
 }
-
-// Compare requested and returned numbers without dots, spaces or a kind suffix.
-function baseNumber(s: string) {
-  return s.replace(/[^A-Za-z0-9]/g, "").toUpperCase().replace(/(?<=\d)[A-Z]\d?$/, "");
-}
-
-type PubEntry = { requested: string; first: FormatCandidate };
-type OkEntry = { requested: string };
 
 type GetPatentDetailsArgs = {
   document_number: string;
@@ -45,65 +29,11 @@ export async function getPatentDetails(
 
   // Batch mode
   if (document_numbers && document_numbers.length > 0) {
-    const allBiblio: PatentBiblio[] = [];
-    const resolvedRequested = new Set<string>();
-    const parseFailures: { number: string; reason: string }[] = [];
-    const pubs: PubEntry[] = [];
-    const recoverable: OkEntry[] = [];
-
-    for (const d of document_numbers) {
-      try {
-        const doc = new DocNumber(d);
-        recoverable.push({ requested: d });
-        if (doc.type === DocType.Publication) {
-          pubs.push({ requested: d, first: doc.formatCandidates()[0] });
-        }
-      } catch (e) {
-        parseFailures.push({ number: d, reason: e instanceof Error ? e.message : String(e) });
-      }
-    }
-
-    // The multi-number endpoint is unreliable: one unknown number fails the
-    // whole request, and pairs of US grants are refused outright. Try it per
-    // first-candidate format in chunks of 20; applications and parse failures
-    // skip this and are recovered individually below.
-    for (const fmt of [...new Set(pubs.map((e) => e.first.format))]) {
-      const nums = pubs.filter((e) => e.first.format === fmt).map((e) => e.first.number);
-      for (let i = 0; i < nums.length; i += 20) {
-        const chunk = nums.slice(i, i + 20);
-        try {
-          allBiblio.push(...parseBiblio(await client.getBiblioMulti(chunk, fmt)).filter((b) => !isStub(b)));
-        } catch {
-          // recovered per number below
-        }
-      }
-    }
-
-    const have = () => new Set(allBiblio.map((b) => baseNumber(b.publicationNumber)));
-    for (const e of pubs) {
-      if (have().has(baseNumber(e.requested)) || have().has(baseNumber(e.first.number))) {
-        resolvedRequested.add(e.requested);
-      }
-    }
-
-    // Last resort (cap 40): resolveAndFetch walks remaining spellings on 404.
-    // Previously also treated an empty/stub biblio body (HTTP 200, no content)
-    // as a miss so the next spelling would be tried; that check was removed.
-    const missing = recoverable.filter((e) => !resolvedRequested.has(e.requested));
-    for (const e of missing.slice(0, 40)) {
-      try {
-        const { raw } = await resolveAndFetch(client, e.requested, (d, f) =>
-          client.getBiblio(d, f)
-        );
-        allBiblio.push(...parseBiblio(raw).filter((b) => !isStub(b)));
-        resolvedRequested.add(e.requested);
-      } catch {
-        // leave unresolved
-      }
-    }
-
-    const results = dedupe(allBiblio);
-    const notFound = document_numbers.filter((d) => !resolvedRequested.has(d));
+    const { records, notFound, parseFailures } = await fetchBiblioBatch(
+      client,
+      document_numbers
+    );
+    const results = dedupe(records);
     const notes: string[] = [];
     if (parseFailures.length > 0) {
       notes.push(
@@ -125,19 +55,10 @@ export async function getPatentDetails(
     };
   }
 
-  // Single mode:resolveAndFetch retries on 404 with docdb/kind spellings.
+  // Single mode: fetchBiblio treats stub/empty bodies as 404.
   try {
-    const { raw, resolvedAs } = await resolveAndFetch(client, document_number, (d, f) =>
-      client.getBiblio(d, f)
-    );
+    const { raw, resolvedAs } = await fetchBiblio(client, document_number);
     const records = dedupe(parseBiblio(raw).filter((b) => !isStub(b)));
-    if (records.length === 0) {
-      return {
-        found: false,
-        documentNumber: document_number,
-        note: `OPS returned no bibliographic data for ${document_number}. Do not cite it as existing. Add a kind code (e.g. "EP.1393417.B1") or verify with search_patents(query='pn="${document_number}"', count_only=true).`,
-      };
-    }
     if (resolvedAs !== document_number) {
       return {
         results: records,
@@ -167,10 +88,6 @@ export function registerGetPatentDetails(server: McpServer, client: EpoClient) {
 IMPORTANT — LEGAL: Only present data returned by this tool. Never fabricate or guess patent metadata. Always include publication numbers when citing results.
 
 Use this when you already have a publication number and need its details. For searching by topic or applicant, use search_patents instead.
-
-Document number formats:
-  epodoc: "EP1000000", "US2020001234", "WO2023123456"
-  docdb: "EP.1000000.A1" (country.number.kind — more precise)
 
 Accepts common written forms (publication or application; kind code optional), e.g. "EP1393417", "EP.1393417.B1", "US 2024/0318857 A1", "EP02729749", "PCT/US2020/012345". Including a kind code selects that exact publication stage; without one, all stages for the number may be returned.
 

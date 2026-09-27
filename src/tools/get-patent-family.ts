@@ -3,7 +3,7 @@ import { z } from "zod";
 import { EpoClient, OpsApiError } from "../epo-client.js";
 import { parseFamilyMembers, type FamilyMember } from "../parsers.js";
 import { wrapJsonTool } from "../helpers.js";
-import { getFamilyWithFormatFallback } from "../fallback.js";
+import { getFamily } from "../resolve.js";
 import { documentNumberParam } from "./params.js";
 
 type GetPatentFamilyArgs = {
@@ -48,28 +48,24 @@ export async function getPatentFamily(
 ) {
   client.startToolCall();
   try {
-    const { raw, resolvedAs } = await getFamilyWithFormatFallback(client, document_number);
-    return formatFamilyResult(parseFamilyMembers(raw), document_number, countries, max_members, resolvedAs);
+    const { raw, resolvedAs, light } = await getFamily(client, document_number);
+    return formatFamilyResult(
+      parseFamilyMembers(raw),
+      document_number,
+      countries,
+      max_members,
+      resolvedAs,
+      light
+        ? "Large family retrieved without biblio data; titles may be missing. Use get_patent_details on individual members."
+        : undefined,
+    );
   } catch (e) {
-    // Handle "smaller chunks" error for very large patent families — retry without biblio
     if (e instanceof OpsApiError && e.message.includes("smaller chunks")) {
-      try {
-        const { raw, resolvedAs } = await getFamilyWithFormatFallback(client, document_number, true);
-        return formatFamilyResult(
-          parseFamilyMembers(raw),
-          document_number,
-          countries,
-          max_members,
-          resolvedAs,
-          "Large family retrieved without biblio data; titles may be missing. Use get_patent_details on individual members.",
-        );
-      } catch {
-        return {
-          error: "family_too_large",
-          documentNumber: document_number,
-          note: `This patent has a very large INPADOC family that exceeds the OPS API response limit. Try requesting a specific family member instead (e.g., the WO or EP publication). You can find the WO publication number by searching: search_patents(query='pn="${document_number}"') or checking get_patent_details for priority claims.`,
-        };
-      }
+      return {
+        error: "family_too_large",
+        documentNumber: document_number,
+        note: `This patent has a very large INPADOC family that exceeds the OPS API response limit. Try requesting a specific family member instead (e.g., the WO or EP publication). You can find the WO publication number by searching: search_patents(query='pn="${document_number}"') or checking get_patent_details for priority claims.`,
+      };
     }
     throw e;
   }

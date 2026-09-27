@@ -4,7 +4,7 @@ import type { EpoClient } from "../epo-client.js";
 import { parseLegalEvents, type LegalEvent } from "../parsers.js";
 import { wrapJsonTool } from "../helpers.js";
 import { isGrantEvent, isSpcEvent, summarizeLegalStatus } from "../legal.js";
-import { resolveAndFetch } from "../fallback.js";
+import { resolveAndFetch } from "../resolve.js";
 import { documentNumberParam } from "./params.js";
 
 type GetPatentLegalStatusArgs = {
@@ -104,7 +104,7 @@ Returns a statusSummary object with:
 
 Plus the full list of raw legal events. Each event now includes refCountryCode (contracting state), effectiveDate, freeText, and yearOfFeePayment when available from the OPS data.`,
     inputSchema: {
-      document_number: documentNumberParam.describe('Patent publication number, e.g. "EP1000000" or "US10000000"'),
+      document_number: documentNumberParam,
       event_types: z
         .array(z.enum(["grant", "lapse", "opposition", "spc_pte", "withdrawal", "abandonment", "fee_payment"]))
         .optional()

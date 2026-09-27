@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { EpoClient } from "../epo-client.js";
 import { parseCitations } from "../parsers.js";
 import { wrapJsonTool } from "../helpers.js";
-import { resolveAndFetch } from "../fallback.js";
+import { fetchBiblio } from "../resolve.js";
 import { documentNumberParam } from "./params.js";
 
 type GetPatentCitationsArgs = {
@@ -17,9 +17,7 @@ export async function getPatentCitations(
   { document_number, max_citations, citations_offset }: GetPatentCitationsArgs,
 ) {
   client.startToolCall();
-  const { raw, resolvedAs } = await resolveAndFetch(client, document_number, (d, f) =>
-    client.getBiblio(d, f)
-  );
+  const { raw, resolvedAs } = await fetchBiblio(client, document_number);
   const citations = parseCitations(raw);
   const allPatent = citations.filter((c) => c.type === "patent");
   const allNpl = citations.filter((c) => c.type === "npl");

@@ -1,9 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { EpoClient } from "../epo-client.js";
+import { EpoClient, OpsApiError } from "../epo-client.js";
 import { parseFulltextParagraphs, searchKeywordsInParagraphs } from "../parsers.js";
 import { wrapJsonTool } from "../helpers.js";
-import { fetchWithFamilyFallback, resolveAndFetch } from "../fallback.js";
+import { fetchFulltext } from "../fallback.js";
 import { documentNumberParam, fallbackToFamilyParam } from "./params.js";
 
 type SearchInPatentTextArgs = {
@@ -30,57 +30,41 @@ export async function searchInPatentText(
 ) {
   client.startToolCall();
 
-  // Resolve the best available document for fulltext
   let resolvedClaimsDoc = document_number;
   let resolvedDescDoc = document_number;
   let substituted = false;
 
-  // Fetch both claims and description — falling back to family if needed
   let claimsRaw: string | null = null;
   let descRaw: string | null = null;
 
-  if (fallback_to_family) {
-    // Try claims with fallback
-    try {
-      const result = await fetchWithFamilyFallback(client,
-        document_number,
-        (d, f) => client.getClaims(d, f)
-      );
-      claimsRaw = result.raw;
-      resolvedClaimsDoc = result.resolvedDocument;
-      if (result.substituted) substituted = true;
-    } catch {
-      // claims unavailable
-    }
+  try {
+    const result = await fetchFulltext(
+      client,
+      document_number,
+      (d, f) => client.getClaims(d, f),
+      { family: fallback_to_family }
+    );
+    claimsRaw = result.raw;
+    resolvedClaimsDoc = result.resolvedAs;
+    if (result.substituted) substituted = true;
+  } catch (e) {
+    if (!(e instanceof OpsApiError)) throw e;
+  }
 
-    // Try description — prefer the same resolved document if claims already substituted
-    const descDoc = substituted ? resolvedClaimsDoc : document_number;
-    try {
-      const result = await fetchWithFamilyFallback(client,
-        descDoc,
-        (d, f) => client.getDescription(d, f)
-      );
-      descRaw = result.raw;
-      resolvedDescDoc = result.resolvedDocument;
-      if (result.substituted) substituted = true;
-    } catch {
-      // description unavailable
-    }
-  } else {
-    try {
-      const r = await resolveAndFetch(client, document_number, (d, f) => client.getClaims(d, f));
-      claimsRaw = r.raw;
-      resolvedClaimsDoc = r.resolvedAs;
-    } catch {
-      claimsRaw = null;
-    }
-    try {
-      const r = await resolveAndFetch(client, document_number, (d, f) => client.getDescription(d, f));
-      descRaw = r.raw;
-      resolvedDescDoc = r.resolvedAs;
-    } catch {
-      descRaw = null;
-    }
+  // Reuse the claims spelling whenever claims succeeded (not only after family substitution).
+  const descDoc = claimsRaw ? resolvedClaimsDoc : document_number;
+  try {
+    const result = await fetchFulltext(
+      client,
+      descDoc,
+      (d, f) => client.getDescription(d, f),
+      { family: fallback_to_family }
+    );
+    descRaw = result.raw;
+    resolvedDescDoc = result.resolvedAs;
+    if (result.substituted) substituted = true;
+  } catch (e) {
+    if (!(e instanceof OpsApiError)) throw e;
   }
 
   if (!claimsRaw && !descRaw) {
@@ -136,7 +120,8 @@ export async function searchInPatentText(
     result.note = `Full text not available for ${document_number}. Search performed against family member(s): claims from ${resolvedClaimsDoc}, description from ${resolvedDescDoc}.`;
     result.resolvedDocuments = { claims: resolvedClaimsDoc, description: resolvedDescDoc };
   } else if (resolvedClaimsDoc !== document_number || resolvedDescDoc !== document_number) {
-    result.resolvedAs = resolvedClaimsDoc !== document_number ? resolvedClaimsDoc : resolvedDescDoc;
+    result.resolvedAs =
+      resolvedClaimsDoc !== document_number ? resolvedClaimsDoc : resolvedDescDoc;
   }
 
   return result;

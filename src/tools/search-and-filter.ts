@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { EpoClient } from "../epo-client.js";
 import { parseSearchResults, parseFulltextParagraphs, searchKeywordsInParagraphs } from "../parsers.js";
 import { wrapJsonTool } from "../helpers.js";
-import { fetchWithFamilyFallback, resolveAndFetch } from "../fallback.js";
+import { fetchFulltext } from "../fallback.js";
 import { fallbackToFamilyParam } from "./params.js";
 import { buildDateCql } from "../search.js";
 
@@ -91,29 +91,25 @@ export async function searchAndFilterFulltext(
 
     if (wantClaims) {
       try {
-        if (fallback_to_family) {
-          const r = await fetchWithFamilyFallback(client, doc, (d, f) => client.getClaims(d, f));
-          claimsRaw = r.raw;
-          if (r.substituted) substitutedFrom = r.resolvedDocument;
-        } else {
-          claimsRaw = (await resolveAndFetch(client, doc, (d, f) => client.getClaims(d, f))).raw;
-        }
+        const r = await fetchFulltext(client, doc, (d, f) => client.getClaims(d, f), {
+          family: fallback_to_family,
+        });
+        claimsRaw = r.raw;
+        if (r.substituted) substitutedFrom = r.resolvedAs;
       } catch {
-        // no claims for this document
+        // no claims for this document — numbers come from OPS search, so skip
       }
     }
 
     if (wantDesc && client.timeRemaining >= RESERVE_MS) {
       try {
         // Prefer the same publication that already yielded claims (family substitute).
-        const srcDoc = substitutedFrom ?? doc;
-        if (fallback_to_family) {
-          const r = await fetchWithFamilyFallback(client, srcDoc, (d, f) => client.getDescription(d, f));
-          descRaw = r.raw;
-          if (r.substituted) substitutedFrom = r.resolvedDocument;
-        } else {
-          descRaw = (await resolveAndFetch(client, srcDoc, (d, f) => client.getDescription(d, f))).raw;
-        }
+        const srcDoc = claimsRaw ? (substitutedFrom ?? doc) : doc;
+        const r = await fetchFulltext(client, srcDoc, (d, f) => client.getDescription(d, f), {
+          family: fallback_to_family,
+        });
+        descRaw = r.raw;
+        if (r.substituted) substitutedFrom = r.resolvedAs;
       } catch {
         // no description for this document
       }

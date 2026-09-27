@@ -1,70 +1,43 @@
 import { EpoClient, OpsApiError } from "./epo-client.js";
-import { OpsFormat } from "./doc-number.js";
 import { parseFamilyMembers } from "./parsers.js";
 import {
-  resolveAndFetch,
+  fetchFirst,
+  getFamilyFromResolved,
+  OpsFormat,
+  resolveCandidates,
   type Fetcher,
 } from "./resolve.js";
 
-export { resolveAndFetch } from "./resolve.js";
-
 /**
- * Fetch a patent family, resolving format/kind (and application → publication)
- * via resolveAndFetch. Pass light=true for the no-biblio variant used when OPS
- * refuses a large family with "smaller chunks".
- */
-export async function getFamilyWithFormatFallback(
-  client: EpoClient,
-  documentNumber: string,
-  light = false
-): Promise<{ raw: string; resolvedAs: string; format: OpsFormat }> {
-  return resolveAndFetch(client, documentNumber, (d, f) =>
-    light ? client.getFamilyLight(d, f) : client.getFamily(d, f)
-  );
-}
-
-/**
- * Try to fetch fulltext (claims or description) for a document.
- * Resolves format/kind/application via resolveAndFetch first. If that
- * returns 404, fetch the patent family and try EP/WO members first
- * (most reliably indexed in OPS), then others.
+ * Fetch fulltext (claims or description) for a document.
+ * Resolves candidates once; on 404 with family=true, looks up the INPADOC
+ * family with those same candidates and tries EP/WO members first.
  * Returns the raw JSON, the document that succeeded, and whether a
  * family substitution was made.
  */
-export async function fetchWithFamilyFallback(
+export async function fetchFulltext(
   client: EpoClient,
   documentNumber: string,
-  fetcher: Fetcher
-): Promise<{ raw: string; resolvedDocument: string; substituted: boolean }> {
+  fetcher: Fetcher,
+  { family }: { family: boolean }
+): Promise<{ raw: string; resolvedAs: string; substituted: boolean }> {
+  const resolved = await resolveCandidates(client, documentNumber);
+
   try {
-    const { raw, resolvedAs } = await resolveAndFetch(client, documentNumber, fetcher);
-    return { raw, resolvedDocument: resolvedAs, substituted: false };
+    const { raw, resolvedAs } = await fetchFirst(resolved, fetcher);
+    return { raw, resolvedAs, substituted: false };
   } catch (e) {
-    if (!(e instanceof OpsApiError) || e.status !== 404) throw e;
+    if (!family || !(e instanceof OpsApiError) || e.status !== 404) throw e;
   }
 
-  // Still 404 — try the patent family
   let familyRaw: string;
   try {
-    familyRaw = (await getFamilyWithFormatFallback(client, documentNumber)).raw;
-  } catch (e) {
-    // Very large families (Xencor, Immunomedics) are refused with "smaller
-    // chunks"; the light variant still lists members, which is all we need.
-    if (e instanceof OpsApiError && e.message.includes("smaller chunks")) {
-      try {
-        familyRaw = (await getFamilyWithFormatFallback(client, documentNumber, true)).raw;
-      } catch {
-        throw new OpsApiError(
-          404,
-          `Full text not available for ${documentNumber} and could not retrieve patent family for fallback.`
-        );
-      }
-    } else {
-      throw new OpsApiError(
-        404,
-        `Full text not available for ${documentNumber} and could not retrieve patent family for fallback.`
-      );
-    }
+    familyRaw = (await getFamilyFromResolved(client, resolved)).raw;
+  } catch {
+    throw new OpsApiError(
+      404,
+      `Full text not available for ${documentNumber} and could not retrieve patent family for fallback.`
+    );
   }
 
   const members = parseFamilyMembers(familyRaw);
@@ -89,7 +62,7 @@ export async function fetchWithFamilyFallback(
     const docdbNum = `${member.country}.${member.rawNumber}.${member.kind}`;
     try {
       const raw = await fetcher(docdbNum, OpsFormat.Docdb);
-      return { raw, resolvedDocument: docdbNum, substituted: true };
+      return { raw, resolvedAs: docdbNum, substituted: true };
     } catch {
       // try next member
     }

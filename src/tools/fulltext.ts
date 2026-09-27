@@ -3,7 +3,8 @@ import { z } from "zod";
 import type { EpoClient } from "../epo-client.js";
 import { parseFulltextParagraphs, paginateParagraphs } from "../parsers.js";
 import { wrapJsonTool } from "../helpers.js";
-import { fetchWithFamilyFallback, resolveAndFetch, substitutionNote } from "../fallback.js";
+import { fetchFulltext, substitutionNote } from "../fallback.js";
+import type { Fetcher } from "../resolve.js";
 import { documentNumberParam, fallbackToFamilyParam } from "./params.js";
 
 type FulltextSection = "claims" | "description";
@@ -26,35 +27,34 @@ const EMPTY_NOTES: Record<FulltextSection, (doc: string) => string> = {
 export async function getFulltext(
   client: EpoClient,
   section: FulltextSection,
-  fetcher: (docNum: string, fmt: string) => Promise<string>,
+  fetcher: Fetcher,
   { document_number, offset, limit, max_characters, fallback_to_family }: FulltextArgs,
 ) {
   client.startToolCall();
-  const { raw, resolvedDocument, substituted } = fallback_to_family
-    ? await fetchWithFamilyFallback(client, document_number, fetcher)
-    : await resolveAndFetch(client, document_number, fetcher).then((r) => ({
-        raw: r.raw,
-        resolvedDocument: r.resolvedAs,
-        substituted: false,
-      }));
+  const { raw, resolvedAs, substituted } = await fetchFulltext(
+    client,
+    document_number,
+    fetcher,
+    { family: fallback_to_family }
+  );
 
   const paragraphs = parseFulltextParagraphs(raw);
   const result = paginateParagraphs(paragraphs, offset, limit, max_characters);
 
   if (substituted) {
-    const note = substitutionNote(document_number, resolvedDocument, section, result.totalParagraphs === 0);
-    return { ...result, note, resolvedDocument };
+    const note = substitutionNote(document_number, resolvedAs, section, result.totalParagraphs === 0);
+    return { ...result, note, resolvedDocument: resolvedAs };
   }
   if (result.totalParagraphs === 0) {
     return {
       ...result,
       note: EMPTY_NOTES[section](document_number),
-      ...(resolvedDocument !== document_number && { resolvedAs: resolvedDocument }),
+      ...(resolvedAs !== document_number && { resolvedAs }),
     };
   }
   return {
     ...result,
-    ...(resolvedDocument !== document_number && { resolvedAs: resolvedDocument }),
+    ...(resolvedAs !== document_number && { resolvedAs }),
   };
 }
 
